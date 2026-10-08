@@ -1,3 +1,5 @@
+import 'dart:async';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../models/cloud_account.dart';
@@ -5,6 +7,7 @@ import '../../services/account_manager.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/oauth_helper.dart';
 import '../../services/onedrive_service.dart';
+import '../../utils/battery_utils.dart';
 
 class AddAccountDialog extends StatefulWidget {
   const AddAccountDialog({super.key});
@@ -19,6 +22,11 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   String? _statusMessage;
   bool _showManualInput = false;
 
+  // Battery & Power Saving detection
+  bool _isPowerSaveActive = false;
+  bool _isBatteryOptimized = false;
+  Timer? _manualRevealTimer;
+
   // Custom API keys (BYOK)
   final TextEditingController _clientIdController = TextEditingController();
   final TextEditingController _clientSecretController = TextEditingController();
@@ -32,8 +40,28 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   final TextEditingController _manualUrlController = TextEditingController();
 
   @override
+  void initState() {
+    super.initState();
+    _checkPowerSaveStatus();
+  }
+
+  Future<void> _checkPowerSaveStatus() async {
+    if (Platform.isAndroid) {
+      final isPowerSave = await BatteryUtils.isPowerSaveMode();
+      final isIgnoring = await BatteryUtils.isIgnoringBatteryOptimizations();
+      if (mounted) {
+        setState(() {
+          _isPowerSaveActive = isPowerSave;
+          _isBatteryOptimized = !isIgnoring;
+        });
+      }
+    }
+  }
+
+  @override
   void dispose() {
     OAuthHelper.cancelAuthentication();
+    _manualRevealTimer?.cancel();
     _clientIdController.dispose();
     _clientSecretController.dispose();
     _webDavUrlController.dispose();
@@ -44,6 +72,13 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   }
 
   Future<void> _startOAuth() async {
+    _manualRevealTimer?.cancel();
+    _manualRevealTimer = Timer(const Duration(seconds: 10), () {
+      if (mounted && _isLoading && !_showManualInput) {
+        setState(() => _showManualInput = true);
+      }
+    });
+
     setState(() {
       _isLoading = true;
       _statusMessage = '웹 브라우저를 열어 클라우드 로그인을 진행합니다...';
@@ -307,6 +342,73 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                     const SizedBox(height: 8),
                   ],
                 ),
+              ],
+
+              if (_selectedType != CloudType.webDav && Platform.isAndroid) ...[
+                if (_isPowerSaveActive && _isBatteryOptimized) ...[
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.withAlpha(35),
+                      borderRadius: BorderRadius.circular(8),
+                      border: Border.all(color: Colors.amber.shade700, width: 1),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: const [
+                            Icon(Icons.battery_alert, color: Colors.amber, size: 20),
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '절전 모드 활성화됨 (네트워크 제한 주의)',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: 13,
+                                  color: Colors.amber,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          '기기가 절전 모드 상태이면 브라우저로 전환 시 백그라운드 네트워크가 차단되어 무한로딩이 발생할 수 있습니다. 아래 버튼을 눌러 배터리 제한을 해제해주세요.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                        const SizedBox(height: 10),
+                        ElevatedButton.icon(
+                          onPressed: () async {
+                            await BatteryUtils.requestIgnoreBatteryOptimizations();
+                            await Future.delayed(const Duration(seconds: 1));
+                            await _checkPowerSaveStatus();
+                          },
+                          icon: const Icon(Icons.bolt, size: 16),
+                          label: const Text('배터리 사용량 제한 없음 허용 (원클릭)', style: TextStyle(fontSize: 12)),
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.amber.shade800,
+                            foregroundColor: Colors.white,
+                            visualDensity: VisualDensity.compact,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ] else if (!_isBatteryOptimized) ...[
+                  const SizedBox(height: 8),
+                  Row(
+                    children: const [
+                      Icon(Icons.check_circle_outline, size: 15, color: Colors.green),
+                      SizedBox(width: 6),
+                      Text(
+                        '배터리 최적화 예외 적용됨 (절전 모드에서도 안정적 통신 유지)',
+                        style: TextStyle(fontSize: 11, color: Colors.green),
+                      ),
+                    ],
+                  ),
+                ],
               ],
 
               if (_statusMessage != null) ...[
