@@ -105,12 +105,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
         return;
       }
 
+      // 이미 자막 트랙이 선택되었거나 로드된 경우 중복 호출 차단 (디먹서 재시작 방지)
+      if (_hasAutoSelectedSubtitle) return;
+
       // 2. 외부 자막(클라우드/로컬) 로딩 중 비디오 내장 영어 자막 노출 방지
-      if ((_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') && !_hasAutoSelectedSubtitle) {
+      if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
         final activeTrack = _player.state.track.subtitle;
         if (activeTrack.id != 'no' && !_isKoreanTrack(activeTrack)) {
           _player.setSubtitleTrack(SubtitleTrack.no());
         }
+        return;
       }
 
       // 3. SAMI의 KRCC 트랙이 감지되면 즉시 한국어 트랙으로 전환
@@ -127,12 +131,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
 
       // 4. 내장 자막 복원 또는 한국어 트랙 자동 선택
-      if (!_hasAutoSelectedSubtitle) {
-        if (_currentSubtitleType == 'track') {
-          _restoreTrackSubtitle(tracks.subtitle);
-        } else if (_currentSubtitleType == null) {
-          _selectKoreanTrack(tracks.subtitle);
-        }
+      if (_currentSubtitleType == 'track') {
+        _restoreTrackSubtitle(tracks.subtitle);
+      } else if (_currentSubtitleType == null) {
+        _selectKoreanTrack(tracks.subtitle);
       }
     });
 
@@ -203,15 +205,65 @@ class _PlayerScreenState extends State<PlayerScreen> {
         await platform?.setProperty('hr-seek', 'default');
       } catch (_) {}
 
-      // 2. 직접 스트림 URL 및 인증 헤더 획득 (libmpv 직접 고속 스트리밍)
+      // 2. 외부 자막 사전 탐색 및 다운로드 (재생 도중 네트워크 대역폭 잠식 및 디먹서 3회 재시작 방지)
+      File? initialSubtitleFile;
+      String? initialSubtitleName;
+
+      final tempDir = Directory.systemTemp;
+      if (_currentSubtitleType == 'cloud' && _currentSubtitleId != null) {
+        final cached = File('${tempDir.path}/${_currentSubtitleId}_${_currentSubtitleName ?? ""}');
+        if (cached.existsSync() && cached.lengthSync() > 0) {
+          initialSubtitleFile = cached;
+          initialSubtitleName = _currentSubtitleName;
+        }
+      } else if (_currentSubtitleType == 'local' && _currentSubtitleId != null) {
+        final local = File(_currentSubtitleId!);
+        if (local.existsSync() && local.lengthSync() > 0) {
+          initialSubtitleFile = local;
+          initialSubtitleName = _currentSubtitleName;
+        }
+      } else if (_currentSubtitleType == null && widget.item.parentId != null) {
+        try {
+          final items = await widget.service.listItems(folderId: widget.item.parentId!);
+          final videoName = widget.item.name;
+          final matchingSubs = items.where((it) => it.isSubtitle && SubtitleUtils.isSubtitleForVideo(it.name, videoName)).toList();
+          if (matchingSubs.isNotEmpty) {
+            matchingSubs.sort((a, b) => SubtitleUtils.koreanScore(b.name).compareTo(SubtitleUtils.koreanScore(a.name)));
+            final selectedSub = matchingSubs.first;
+            final file = File('${tempDir.path}/${selectedSub.id}_${selectedSub.name}');
+            if (file.existsSync() && file.lengthSync() > 0) {
+              initialSubtitleFile = file;
+            } else {
+              final url = await widget.service.getStreamUrl(selectedSub);
+              final headers = await widget.service.getStreamHeaders();
+              final res = await http.get(Uri.parse(url), headers: headers);
+              if (res.statusCode == 200) {
+                await file.writeAsBytes(res.bodyBytes);
+                initialSubtitleFile = file;
+              }
+            }
+            if (initialSubtitleFile != null) {
+              initialSubtitleName = selectedSub.name;
+              _currentSubtitleType = 'cloud';
+              _currentSubtitleId = selectedSub.id;
+              _currentSubtitleName = selectedSub.name;
+              _currentSubtitleLanguage = 'ko';
+            }
+          }
+        } catch (_) {}
+      }
+
+      // 3. 직접 스트림 URL 및 인증 헤더 획득 (libmpv 직접 고속 스트리밍)
       await widget.service.refreshTokensIfNeeded();
       final directUrl = await widget.service.getStreamUrl(widget.item);
       final headers = await widget.service.getStreamHeaders();
 
+      // 4. Media에 start: resumePos를 전달하여 첫 프레임부터 이전 위치에서 디코딩 개시!
       await _player.open(
         Media(
           directUrl,
           httpHeaders: headers,
+          start: resumePos,
         ),
         play: true,
       );
@@ -219,10 +271,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _ensureAutoPlay();
 
       if (resumePos != null && resumePos > const Duration(seconds: 5)) {
-        _resumeToPosition(resumePos);
+        _showResumeNotice(resumePos);
       }
 
-      // 첫 스트림 재생 준비 감지 (최대 3초)
+      // 5. 다운로드 완료된 외부 자막이 있으면 즉시 단 1회만 연결
+      if (initialSubtitleFile != null && initialSubtitleFile.existsSync()) {
+        await _player.setSubtitleTrack(
+          SubtitleTrack.uri(initialSubtitleFile.path, title: initialSubtitleName, language: 'ko'),
+        );
+        _hasAutoSelectedSubtitle = true;
+        _saveCurrentPosition();
+        if (mounted && initialSubtitleName != null) {
+          _showNotificationBanner(
+            message: '한국어 자막 자동 적용: $initialSubtitleName',
+            icon: Icons.subtitles,
+            iconColor: Colors.amber,
+            duration: const Duration(seconds: 3),
+          );
+        }
+      } else {
+        _restoreOrAutoLoadSubtitle();
+      }
+
+      // 6. 첫 스트림 재생 준비 감지 (최대 3초) 후 로딩 스피너 종료
       try {
         final d = await _player.stream.duration.firstWhere((val) => val > Duration.zero).timeout(
           const Duration(seconds: 3),
@@ -230,6 +301,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
         );
         if (d > Duration.zero && mounted) {
           setState(() => _totalDuration = d);
+          // 안전망: 만약 Media(start: resumePos)가 적용되지 않고 0초에서 시작되었다면 1회 보정
+          if (resumePos != null && !_hasResumed && _player.state.position < const Duration(seconds: 3)) {
+            _hasResumed = true;
+            await _player.seek(resumePos);
+          }
         }
       } catch (_) {}
 
@@ -239,7 +315,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
         });
       }
       _startHideTimer();
-      _restoreOrAutoLoadSubtitle();
     } catch (e) {
       // 직접 연결 오류 시 로컬 프록시로 폴백
       try {
@@ -263,11 +338,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
         }
 
         final streamUrl = LocalStreamProxy.instance.registerStream(widget.service, widget.item);
-        await _player.open(Media(streamUrl), play: true);
+        await _player.open(
+          Media(
+            streamUrl,
+            start: resumePos,
+          ),
+          play: true,
+        );
         _ensureAutoPlay();
 
         if (resumePos != null && resumePos > const Duration(seconds: 5)) {
-          _resumeToPosition(resumePos);
+          _showResumeNotice(resumePos);
         }
 
         try {
@@ -277,6 +358,10 @@ class _PlayerScreenState extends State<PlayerScreen> {
           );
           if (d > Duration.zero && mounted) {
             setState(() => _totalDuration = d);
+            if (resumePos != null && !_hasResumed && _player.state.position < const Duration(seconds: 3)) {
+              _hasResumed = true;
+              await _player.seek(resumePos);
+            }
           }
         } catch (_) {}
 
@@ -412,6 +497,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _autoLoadKoreanSubtitle() async {
+    if (_hasAutoSelectedSubtitle) return;
     final parentId = widget.item.parentId;
     if (parentId == null) {
       _selectKoreanTrack(_player.state.tracks.subtitle);
@@ -501,6 +587,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
   }
 
   Future<void> _restoreOrAutoLoadSubtitle() async {
+    if (_hasAutoSelectedSubtitle) return;
+
     // 1. 이전 설정이 '자막 끄기'였던 경우
     if (_currentSubtitleType == 'none') {
       await _player.setSubtitleTrack(SubtitleTrack.no());
@@ -775,14 +863,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  void _resumeToPosition(Duration target) {
-    if (_hasResumed) return;
-    _hasResumed = true;
-
-    // 즉시 목표 위치로 탐색 1회 요청 (주기적 루프를 제거하여 사용자의 첫 슬라이더 조작 지연/충돌 완전 해결)
-    _player.seek(target);
-    _showResumeNotice(target);
-  }
 
   void _dismissBanner() {
     _bannerDismissTimer?.cancel();
