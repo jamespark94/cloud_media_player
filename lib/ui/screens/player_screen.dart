@@ -10,6 +10,7 @@ import '../../models/media_item.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/local_stream_proxy.dart';
 import '../../services/playback_history_service.dart';
+import '../../utils/platform_utils.dart';
 import '../../utils/subtitle_utils.dart';
 import '../widgets/subtitle_dialog.dart';
 
@@ -70,7 +71,13 @@ class _PlayerScreenState extends State<PlayerScreen> {
     super.initState();
     _totalDuration = widget.item.duration ?? Duration.zero;
     _player = Player();
-    _controller = VideoController(_player);
+    final videoConfig = PlatformUtils.isAndroidEmulator
+        ? const VideoControllerConfiguration(
+            vo: 'mediacodec_embed',
+            hwdec: 'mediacodec',
+          )
+        : const VideoControllerConfiguration();
+    _controller = VideoController(_player, configuration: videoConfig);
     _player.stream.duration.listen((d) {
       if (d > Duration.zero && mounted) {
         setState(() {
@@ -263,7 +270,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     // 백그라운드 감시 루프: 로딩 완료 시점 즉시 100% 자동 재생 보장
     Future.microtask(() async {
-      for (int i = 0; i < 15; i++) {
+      for (int i = 0; i < 30; i++) {
         await Future.delayed(const Duration(milliseconds: 200));
         if (!mounted) return;
         if (_player.state.playing) {
@@ -871,6 +878,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
           autofocus: true,
           child: MouseRegion(
             onHover: (event) {
+              if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) return;
               final size = MediaQuery.of(context).size;
               final isEdge = event.position.dy < size.height * 0.30 || event.position.dy > size.height * 0.70;
 
@@ -889,6 +897,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
               }
             },
             onExit: (event) {
+              if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) return;
               // 마우스 포인터가 화면 밖으로 벗어난 경우 즉시 UI 숨김
               if (_showControls && _dragPosition == null && _player.state.playing) {
                 _hideControlsTimer?.cancel();

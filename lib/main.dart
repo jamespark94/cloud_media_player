@@ -8,6 +8,7 @@ import 'services/folder_shortcut_manager.dart';
 import 'services/local_stream_proxy.dart';
 import 'services/playback_history_service.dart';
 import 'ui/screens/home_screen.dart';
+import 'utils/platform_utils.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -19,7 +20,10 @@ void main() async {
   // 1. 고화질 비디오 재생 엔진 (libmpv 기반 media_kit) 초기화
   MediaKit.ensureInitialized();
 
-  // 2. 대용량 동영상 구간 탐색(Seek) 및 토큰 중계 로컬 스트림 프록시 기동
+  // 2. 플랫폼 환경(에뮬레이터 여부 등) 감지 초기화
+  await PlatformUtils.initialize();
+
+  // 3. 대용량 동영상 구간 탐색(Seek) 및 토큰 중계 로컬 스트림 프록시 기동
   await LocalStreamProxy.instance.start();
 
   runApp(
