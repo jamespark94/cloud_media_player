@@ -304,6 +304,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _isFullScreen = !isFull;
         });
       }
+    } else {
+      final nextState = !_isFullScreen;
+      if (nextState) {
+        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+        await SystemChrome.setPreferredOrientations([
+          DeviceOrientation.landscapeLeft,
+          DeviceOrientation.landscapeRight,
+        ]);
+      } else {
+        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+        await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+      }
+      if (mounted) {
+        setState(() {
+          _isFullScreen = nextState;
+        });
+      }
     }
   }
 
@@ -312,6 +329,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
       final isFull = await windowManager.isFullScreen();
       if (isFull) {
         await windowManager.setFullScreen(false);
+        if (mounted) {
+          setState(() {
+            _isFullScreen = false;
+          });
+        }
+      }
+    } else {
+      if (_isFullScreen) {
+        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+        await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
         if (mounted) {
           setState(() {
             _isFullScreen = false;
