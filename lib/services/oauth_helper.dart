@@ -38,9 +38,24 @@ class OAuthHelper {
     final uri = Uri.parse(authUrlWithoutParams).replace(queryParameters: params);
 
     // 기본 웹 브라우저에서 인증 URL 실행
-    if (await canLaunchUrl(uri)) {
-      await launchUrl(uri, mode: LaunchMode.externalApplication);
-    } else {
+    bool launched = false;
+    try {
+      if (await canLaunchUrl(uri)) {
+        launched = await launchUrl(uri, mode: LaunchMode.externalApplication);
+      }
+      if (!launched) {
+        launched = await launchUrl(uri, mode: LaunchMode.platformDefault);
+      }
+    } catch (_) {
+      try {
+        launched = await launchUrl(uri);
+      } catch (e) {
+        await server.close();
+        throw Exception('브라우저를 열 수 없습니다: $e');
+      }
+    }
+
+    if (!launched) {
       await server.close();
       throw Exception('브라우저를 열 수 없습니다: $uri');
     }
