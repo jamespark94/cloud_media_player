@@ -17,6 +17,7 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   CloudType _selectedType = CloudType.googleDrive;
   bool _isLoading = false;
   String? _statusMessage;
+  bool _showManualInput = false;
 
   // Custom API keys (BYOK)
   final TextEditingController _clientIdController = TextEditingController();
@@ -26,6 +27,21 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   final TextEditingController _webDavUrlController = TextEditingController();
   final TextEditingController _webDavUserController = TextEditingController();
   final TextEditingController _webDavPasswordController = TextEditingController();
+
+  // Manual OAuth URL/Code Fallback
+  final TextEditingController _manualUrlController = TextEditingController();
+
+  @override
+  void dispose() {
+    OAuthHelper.cancelAuthentication();
+    _clientIdController.dispose();
+    _clientSecretController.dispose();
+    _webDavUrlController.dispose();
+    _webDavUserController.dispose();
+    _webDavPasswordController.dispose();
+    _manualUrlController.dispose();
+    super.dispose();
+  }
 
   Future<void> _startOAuth() async {
     setState(() {
@@ -78,6 +94,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     final code = await OAuthHelper.authenticateWithLoopback(
       authUrlWithoutParams: GoogleDriveService.authEndpoint,
       params: params,
+      port: 8999,
+      redirectPath: '/callback',
     );
 
     if (code == null) throw Exception('인증 코드가 수신되지 않았습니다.');
@@ -128,9 +146,14 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
       'code_challenge_method': 'S256',
     };
 
+    final port = clientId == OneDriveService.defaultClientId ? 53682 : 8999;
+    final redirectPath = clientId == OneDriveService.defaultClientId ? '/' : '/callback';
+
     final code = await OAuthHelper.authenticateWithLoopback(
       authUrlWithoutParams: 'https://login.microsoftonline.com/common/oauth2/v2.0/authorize',
       params: params,
+      port: port,
+      redirectPath: redirectPath,
     );
 
     if (code == null) throw Exception('인증 코드가 수신되지 않았습니다.');
@@ -294,23 +317,90 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                     color: Colors.blueAccent.withAlpha(30),
                     borderRadius: BorderRadius.circular(8),
                   ),
-                  child: Row(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      if (_isLoading)
-                        const SizedBox(
-                          width: 16,
-                          height: 16,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      else
-                        const Icon(Icons.info_outline, size: 18, color: Colors.blueAccent),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(
-                          _statusMessage!,
-                          style: const TextStyle(fontSize: 13),
-                        ),
+                      Row(
+                        children: [
+                          if (_isLoading)
+                            const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            )
+                          else
+                            const Icon(Icons.info_outline, size: 18, color: Colors.blueAccent),
+                          const SizedBox(width: 10),
+                          Expanded(
+                            child: Text(
+                              _statusMessage!,
+                              style: const TextStyle(fontSize: 13),
+                            ),
+                          ),
+                        ],
                       ),
+                      if (_isLoading && _selectedType != CloudType.webDav) ...[
+                        const SizedBox(height: 10),
+                        InkWell(
+                          onTap: () {
+                            setState(() => _showManualInput = !_showManualInput);
+                          },
+                          child: Row(
+                            children: [
+                              Icon(
+                                _showManualInput ? Icons.keyboard_arrow_up : Icons.keyboard_arrow_down,
+                                size: 16,
+                                color: Colors.blueAccent,
+                              ),
+                              const SizedBox(width: 4),
+                              const Text(
+                                '브라우저에서 리디렉트가 멈춘 경우 (수동 URL 입력)',
+                                style: TextStyle(
+                                  fontSize: 12,
+                                  color: Colors.blueAccent,
+                                  decoration: TextDecoration.underline,
+                                ),
+                              ),
+                            ],
+                          ),
+                        ),
+                        if (_showManualInput) ...[
+                          const SizedBox(height: 8),
+                          Row(
+                            children: [
+                              Expanded(
+                                child: TextField(
+                                  controller: _manualUrlController,
+                                  style: const TextStyle(fontSize: 12),
+                                  decoration: const InputDecoration(
+                                    hintText: '브라우저 주소창 전체 URL 또는 code 붙여넣기',
+                                    isDense: true,
+                                    contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                                    border: OutlineInputBorder(),
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 8),
+                              ElevatedButton(
+                                onPressed: () {
+                                  final success = OAuthHelper.submitManualCallback(
+                                    _manualUrlController.text,
+                                  );
+                                  if (!success) {
+                                    ScaffoldMessenger.of(context).showSnackBar(
+                                      const SnackBar(content: Text('유효한 URL이나 코드를 입력해주세요.')),
+                                    );
+                                  }
+                                },
+                                style: ElevatedButton.styleFrom(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                                ),
+                                child: const Text('입력 완료', style: TextStyle(fontSize: 12)),
+                              ),
+                            ],
+                          ),
+                        ],
+                      ],
                     ],
                   ),
                 ),
