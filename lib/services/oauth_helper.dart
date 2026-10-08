@@ -99,6 +99,30 @@ class OAuthHelper {
     return authCode;
   }
 
+  static Future<http.Response> _postWithRetry(
+    Uri uri, {
+    Map<String, String>? headers,
+    Object? body,
+    int maxAttempts = 5,
+  }) async {
+    dynamic lastError;
+    for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        final res = await http.post(uri, headers: headers, body: body);
+        return res;
+      } on SocketException catch (e) {
+        lastError = e;
+        if (attempt == maxAttempts) rethrow;
+        await Future.delayed(Duration(milliseconds: 600 * attempt));
+      } catch (e) {
+        lastError = e;
+        if (attempt == maxAttempts) rethrow;
+        await Future.delayed(Duration(milliseconds: 600 * attempt));
+      }
+    }
+    throw lastError ?? Exception('네트워크 요청 실패: $uri');
+  }
+
   /// Google Drive OAuth 토큰 교환
   static Future<Map<String, dynamic>> exchangeGoogleToken({
     required String code,
@@ -118,7 +142,7 @@ class OAuthHelper {
       body['client_secret'] = clientSecret;
     }
 
-    final res = await http.post(
+    final res = await _postWithRetry(
       Uri.parse('https://oauth2.googleapis.com/token'),
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: body,
@@ -149,7 +173,7 @@ class OAuthHelper {
       body['client_secret'] = clientSecret;
     }
 
-    final res = await http.post(
+    final res = await _postWithRetry(
       Uri.parse('https://login.microsoftonline.com/common/oauth2/v2.0/token'),
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: body,
