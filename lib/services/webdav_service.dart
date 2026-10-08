@@ -5,7 +5,7 @@ import '../models/media_item.dart';
 import 'cloud_service_interface.dart';
 
 class WebDavService extends CloudService {
-  WebDavService(super.account);
+  WebDavService(super.account, {super.onAccountUpdated});
 
   String get _authHeader {
     final user = account.webDavUser ?? '';

@@ -82,8 +82,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
 
     if (code == null) throw Exception('인증 코드가 수신되지 않았습니다.');
 
-    setState(() => _statusMessage = '인증 토큰 교환 중...');
-    await Future.delayed(const Duration(milliseconds: 600));
+    setState(() => _statusMessage = '인증이 확인되었습니다. 토큰 발급 및 계정 등록 중...');
+    await Future.delayed(const Duration(milliseconds: 1200));
     final tokenData = await OAuthHelper.exchangeGoogleToken(
       code: code,
       redirectUri: params['redirect_uri']!,
@@ -135,8 +135,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
 
     if (code == null) throw Exception('인증 코드가 수신되지 않았습니다.');
 
-    setState(() => _statusMessage = '인증 토큰 교환 중...');
-    await Future.delayed(const Duration(milliseconds: 600));
+    setState(() => _statusMessage = '인증이 확인되었습니다. 토큰 발급 및 계정 등록 중...');
+    await Future.delayed(const Duration(milliseconds: 1200));
     final tokenData = await OAuthHelper.exchangeOneDriveToken(
       code: code,
       redirectUri: params['redirect_uri']!,

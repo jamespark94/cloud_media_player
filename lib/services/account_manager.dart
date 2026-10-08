@@ -48,11 +48,11 @@ class AccountManager extends ChangeNotifier {
   CloudService getService(CloudAccount account) {
     switch (account.type) {
       case CloudType.googleDrive:
-        return GoogleDriveService(account);
+        return GoogleDriveService(account, onAccountUpdated: saveAccount);
       case CloudType.oneDrive:
-        return OneDriveService(account);
+        return OneDriveService(account, onAccountUpdated: saveAccount);
       case CloudType.webDav:
-        return WebDavService(account);
+        return WebDavService(account, onAccountUpdated: saveAccount);
     }
   }
 }

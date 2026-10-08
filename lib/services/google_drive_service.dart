@@ -2,9 +2,10 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/media_item.dart';
 import 'cloud_service_interface.dart';
+import 'oauth_helper.dart';
 
 class GoogleDriveService extends CloudService {
-  GoogleDriveService(super.account);
+  GoogleDriveService(super.account, {super.onAccountUpdated});
 
   static const String defaultClientId =
       '849319808940-5m9i1p7om6o62e3tgh8c8r6r0k9g7mgh.apps.googleusercontent.com'; // Standard public fallback
@@ -30,7 +31,7 @@ class GoogleDriveService extends CloudService {
         body['client_secret'] = account.customClientSecret!;
       }
 
-      final res = await http.post(
+      final res = await OAuthHelper.postWithRetry(
         Uri.parse(tokenEndpoint),
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: body,
@@ -39,8 +40,12 @@ class GoogleDriveService extends CloudService {
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         account.accessToken = data['access_token'];
+        if (data['refresh_token'] != null && (data['refresh_token'] as String).isNotEmpty) {
+          account.refreshToken = data['refresh_token'];
+        }
         final expiresIn = data['expires_in'] as int? ?? 3600;
         account.tokenExpiry = DateTime.now().add(Duration(seconds: expiresIn));
+        await onAccountUpdated?.call(account);
         return true;
       }
     } catch (_) {}

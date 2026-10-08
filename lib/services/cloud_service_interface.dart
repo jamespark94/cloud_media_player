@@ -3,7 +3,9 @@ import '../models/media_item.dart';
 
 abstract class CloudService {
   final CloudAccount account;
-  CloudService(this.account);
+  final Future<void> Function(CloudAccount)? onAccountUpdated;
+
+  CloudService(this.account, {this.onAccountUpdated});
 
   /// 해당 폴더 내의 파일 및 서브 폴더 목록을 조회합니다.
   Future<List<MediaItem>> listItems({String? folderId});

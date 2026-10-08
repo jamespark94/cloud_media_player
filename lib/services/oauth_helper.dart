@@ -99,11 +99,11 @@ class OAuthHelper {
     return authCode;
   }
 
-  static Future<http.Response> _postWithRetry(
+  static Future<http.Response> postWithRetry(
     Uri uri, {
     Map<String, String>? headers,
     Object? body,
-    int maxAttempts = 5,
+    int maxAttempts = 8,
   }) async {
     dynamic lastError;
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -113,11 +113,11 @@ class OAuthHelper {
       } on SocketException catch (e) {
         lastError = e;
         if (attempt == maxAttempts) rethrow;
-        await Future.delayed(Duration(milliseconds: 600 * attempt));
+        await Future.delayed(Duration(milliseconds: 1000 + (500 * attempt)));
       } catch (e) {
         lastError = e;
         if (attempt == maxAttempts) rethrow;
-        await Future.delayed(Duration(milliseconds: 600 * attempt));
+        await Future.delayed(Duration(milliseconds: 1000 + (500 * attempt)));
       }
     }
     throw lastError ?? Exception('네트워크 요청 실패: $uri');
@@ -142,7 +142,7 @@ class OAuthHelper {
       body['client_secret'] = clientSecret;
     }
 
-    final res = await _postWithRetry(
+    final res = await postWithRetry(
       Uri.parse('https://oauth2.googleapis.com/token'),
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: body,
@@ -173,7 +173,7 @@ class OAuthHelper {
       body['client_secret'] = clientSecret;
     }
 
-    final res = await _postWithRetry(
+    final res = await postWithRetry(
       Uri.parse('https://login.microsoftonline.com/common/oauth2/v2.0/token'),
       headers: {'Content-Type': 'application/x-www-form-urlencoded'},
       body: body,

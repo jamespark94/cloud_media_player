@@ -2,9 +2,10 @@ import 'dart:convert';
 import 'package:http/http.dart' as http;
 import '../models/media_item.dart';
 import 'cloud_service_interface.dart';
+import 'oauth_helper.dart';
 
 class OneDriveService extends CloudService {
-  OneDriveService(super.account);
+  OneDriveService(super.account, {super.onAccountUpdated});
 
   static const String defaultClientId = 'd3590ed6-52b3-4102-aeff-aad22ac2ab01'; // Public MS Graph client id fallback
   static const String tokenEndpoint = 'https://login.microsoftonline.com/common/oauth2/v2.0/token';
@@ -28,7 +29,7 @@ class OneDriveService extends CloudService {
         body['client_secret'] = account.customClientSecret!;
       }
 
-      final res = await http.post(
+      final res = await OAuthHelper.postWithRetry(
         Uri.parse(tokenEndpoint),
         headers: {'Content-Type': 'application/x-www-form-urlencoded'},
         body: body,
@@ -37,8 +38,12 @@ class OneDriveService extends CloudService {
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         account.accessToken = data['access_token'];
+        if (data['refresh_token'] != null && (data['refresh_token'] as String).isNotEmpty) {
+          account.refreshToken = data['refresh_token'];
+        }
         final expiresIn = data['expires_in'] as int? ?? 3600;
         account.tokenExpiry = DateTime.now().add(Duration(seconds: expiresIn));
+        await onAccountUpdated?.call(account);
         return true;
       }
     } catch (_) {}
