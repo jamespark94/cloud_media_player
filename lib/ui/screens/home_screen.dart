@@ -77,9 +77,12 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Icon(Icons.play_circle_filled, color: Colors.blueAccent),
             SizedBox(width: 8),
-            Text(
-              '클라우드 미디어 플레이어',
-              style: TextStyle(fontWeight: FontWeight.bold, fontSize: 18),
+            Expanded(
+              child: Text(
+                '클라우드 미디어 플레이어',
+                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 17),
+                overflow: TextOverflow.ellipsis,
+              ),
             ),
           ],
         ),
