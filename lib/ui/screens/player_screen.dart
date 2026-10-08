@@ -70,12 +70,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
   void initState() {
     super.initState();
     _totalDuration = widget.item.duration ?? Duration.zero;
-    _player = Player();
-    final videoConfig = PlatformUtils.isAndroidEmulator
-        ? const VideoControllerConfiguration(
-            vo: 'mediacodec_embed',
-            hwdec: 'mediacodec',
-          )
+    _player = Player(
+      configuration: const PlayerConfiguration(
+        bufferSize: 64 * 1024 * 1024,
+      ),
+    );
+    final videoConfig = Platform.isAndroid
+        ? (PlatformUtils.isAndroidEmulator
+            ? const VideoControllerConfiguration(
+                vo: 'mediacodec_embed',
+                hwdec: 'mediacodec',
+              )
+            : const VideoControllerConfiguration(
+                hwdec: 'mediacodec',
+              ))
         : const VideoControllerConfiguration();
     _controller = VideoController(_player, configuration: videoConfig);
     _player.stream.duration.listen((d) {
@@ -180,10 +188,19 @@ class _PlayerScreenState extends State<PlayerScreen> {
         _hasCapturedThumbnail = true;
       }
 
-      // libmpv 자막 우선순위 (한국어) 및 인코딩(CP949/EUC-KR) 자동 감지 설정
+      // libmpv 자막 우선순위 및 고성능 네트워크 스트리밍 버퍼 캐시 설정
       try {
-        await (_player.platform as dynamic)?.setProperty('slang', 'ko,kor,korean,kr');
-        await (_player.platform as dynamic)?.setProperty('sub-codepage', 'auto:cp949');
+        final platform = (_player.platform as dynamic);
+        await platform?.setProperty('slang', 'ko,kor,korean,kr');
+        await platform?.setProperty('sub-codepage', 'auto:cp949');
+        await platform?.setProperty('demuxer-max-bytes', '67108864'); // 64MB 대용량 버퍼
+        await platform?.setProperty('demuxer-max-back-bytes', '33554432'); // 32MB 역방향 캐시
+        await platform?.setProperty('demuxer-readahead-secs', '30'); // 30초 선행 버퍼링
+        await platform?.setProperty('cache', 'yes');
+        await platform?.setProperty('cache-secs', '30');
+        await platform?.setProperty('network-timeout', '15');
+        await platform?.setProperty('force-seekable', 'yes');
+        await platform?.setProperty('hr-seek', 'default');
       } catch (_) {}
 
       // 2. 직접 스트림 URL 및 인증 헤더 획득 (libmpv 직접 고속 스트리밍)
@@ -204,6 +221,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
       if (resumePos != null && resumePos > const Duration(seconds: 5)) {
         _resumeToPosition(resumePos);
       }
+
+      // 첫 스트림 재생 준비 감지 (최대 3초)
+      try {
+        final d = await _player.stream.duration.firstWhere((val) => val > Duration.zero).timeout(
+          const Duration(seconds: 3),
+          onTimeout: () => _totalDuration,
+        );
+        if (d > Duration.zero && mounted) {
+          setState(() => _totalDuration = d);
+        }
+      } catch (_) {}
 
       if (mounted) {
         setState(() {
@@ -242,6 +270,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
           _resumeToPosition(resumePos);
         }
 
+        try {
+          final d = await _player.stream.duration.firstWhere((val) => val > Duration.zero).timeout(
+            const Duration(seconds: 3),
+            onTimeout: () => _totalDuration,
+          );
+          if (d > Duration.zero && mounted) {
+            setState(() => _totalDuration = d);
+          }
+        } catch (_) {}
+
         if (mounted) {
           setState(() {
             _isLoading = false;
@@ -265,19 +303,6 @@ class _PlayerScreenState extends State<PlayerScreen> {
     _autoPlaySub = _player.stream.buffering.listen((buffering) {
       if (!buffering && !_player.state.playing && mounted) {
         _player.play();
-      }
-    });
-
-    // 백그라운드 감시 루프: 로딩 완료 시점 즉시 100% 자동 재생 보장
-    Future.microtask(() async {
-      for (int i = 0; i < 30; i++) {
-        await Future.delayed(const Duration(milliseconds: 200));
-        if (!mounted) return;
-        if (_player.state.playing) {
-          _autoPlaySub?.cancel();
-          break;
-        }
-        await _player.play();
       }
     });
   }
@@ -717,7 +742,16 @@ class _PlayerScreenState extends State<PlayerScreen> {
     if (_player.state.playing) {
       _captureThumbnailIfNeeded(force: true);
     }
-    _player.playOrPause();
+    if (_player.state.completed) {
+      _player.seek(Duration.zero);
+      _player.play();
+    } else {
+      _player.playOrPause();
+    }
+  }
+
+  void _cancelAutoResume() {
+    _hasResumed = true;
   }
 
   void _saveCurrentPosition() {
@@ -743,31 +777,11 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   void _resumeToPosition(Duration target) {
     if (_hasResumed) return;
+    _hasResumed = true;
 
-    // 즉시 목표 위치로 탐색 요청
+    // 즉시 목표 위치로 탐색 1회 요청 (주기적 루프를 제거하여 사용자의 첫 슬라이더 조작 지연/충돌 완전 해결)
     _player.seek(target);
-
-    // 스트림이 완전히 로딩되어 재생이 개시될 때 확실하게 위치를 복구
-    Timer.periodic(const Duration(milliseconds: 250), (timer) {
-      if (!mounted || _hasResumed) {
-        timer.cancel();
-        return;
-      }
-      final currentPos = _player.state.position;
-      if (currentPos >= target - const Duration(seconds: 2)) {
-        _hasResumed = true;
-        timer.cancel();
-        _showResumeNotice(target);
-      } else if (_player.state.playing && currentPos > Duration.zero) {
-        _player.seek(target);
-        _hasResumed = true;
-        timer.cancel();
-        _showResumeNotice(target);
-      } else if (timer.tick > 20) {
-        _hasResumed = true;
-        timer.cancel();
-      }
-    });
+    _showResumeNotice(target);
   }
 
   void _dismissBanner() {
@@ -920,15 +934,29 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
                   // 2. 로딩 인디케이터
                   if (_isLoading)
-                    const Center(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          CircularProgressIndicator(color: Colors.blueAccent),
-                          SizedBox(height: 16),
-                          Text('클라우드에서 스트림 연결 중...',
-                              style: TextStyle(color: Colors.white70)),
-                        ],
+                    Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+                        decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.white24, width: 0.8),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: const [
+                            CircularProgressIndicator(color: Colors.blueAccent, strokeWidth: 3.5),
+                            SizedBox(height: 14),
+                            Text(
+                              '동영상 스트림 로딩 중...',
+                              style: TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
                       ),
                     ),
 
@@ -1150,19 +1178,26 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Widget _buildCenterPlayPause() {
     return StreamBuilder<bool>(
       stream: _player.stream.playing,
-      builder: (context, snapshot) {
-        final isPlaying = snapshot.data ?? false;
+      initialData: _player.state.playing,
+      builder: (context, playSnap) {
+        final isPlaying = playSnap.data ?? _player.state.playing;
         return StreamBuilder<bool>(
           stream: _player.stream.buffering,
+          initialData: _player.state.buffering,
           builder: (context, bufSnap) {
-            final isBuffering = bufSnap.data ?? false;
-            if (isBuffering && isPlaying) {
-              return const SizedBox(
-                width: 72,
-                height: 72,
-                child: Padding(
-                  padding: EdgeInsets.all(16),
-                  child: CircularProgressIndicator(color: Colors.white, strokeWidth: 3),
+            final isBuffering = bufSnap.data ?? _player.state.buffering;
+            if (_isLoading || isBuffering) {
+              return Container(
+                width: 76,
+                height: 76,
+                padding: const EdgeInsets.all(18),
+                decoration: const BoxDecoration(
+                  color: Colors.black54,
+                  shape: BoxShape.circle,
+                ),
+                child: const CircularProgressIndicator(
+                  color: Colors.blueAccent,
+                  strokeWidth: 3.5,
                 ),
               );
             }
@@ -1173,7 +1208,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 color: Colors.white.withAlpha(220),
               ),
               onPressed: () {
-                _player.playOrPause();
+                _togglePlayPause();
                 _startHideTimer();
               },
             );
@@ -1224,6 +1259,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
                           max: hasDuration ? maxMs : 1.0,
                           onChangeStart: hasDuration
                               ? (val) {
+                                  _cancelAutoResume();
                                   _hideControlsTimer?.cancel();
                                   setState(() {
                                     _dragPosition = Duration(milliseconds: val.toInt());
@@ -1281,17 +1317,34 @@ class _PlayerScreenState extends State<PlayerScreen> {
                 children: [
                   StreamBuilder<bool>(
                     stream: _player.stream.playing,
-                    builder: (context, snapshot) {
-                      final isPlaying = snapshot.data ?? false;
-                      return IconButton(
-                        icon: Icon(
-                          isPlaying ? Icons.pause : Icons.play_arrow,
-                          color: Colors.white,
-                        ),
-                        tooltip: isPlaying ? '일시 정지 (Space)' : '재생 (Space)',
-                        onPressed: () {
-                          _togglePlayPause();
-                          _startHideTimer();
+                    initialData: _player.state.playing,
+                    builder: (context, playSnap) {
+                      final isPlaying = playSnap.data ?? _player.state.playing;
+                      return StreamBuilder<bool>(
+                        stream: _player.stream.buffering,
+                        initialData: _player.state.buffering,
+                        builder: (context, bufSnap) {
+                          final isBuffering = bufSnap.data ?? _player.state.buffering;
+                          return IconButton(
+                            icon: isBuffering
+                                ? const SizedBox(
+                                    width: 20,
+                                    height: 20,
+                                    child: CircularProgressIndicator(
+                                      color: Colors.white,
+                                      strokeWidth: 2,
+                                    ),
+                                  )
+                                : Icon(
+                                    isPlaying ? Icons.pause : Icons.play_arrow,
+                                    color: Colors.white,
+                                  ),
+                            tooltip: isPlaying ? '일시 정지 (Space)' : '재생 (Space)',
+                            onPressed: () {
+                              _togglePlayPause();
+                              _startHideTimer();
+                            },
+                          );
                         },
                       );
                     },
