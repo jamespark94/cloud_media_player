@@ -324,4 +324,68 @@ class OAuthHelper {
     }
     return jsonDecode(res.body);
   }
+
+  /// Box OAuth 토큰 교환
+  static Future<Map<String, dynamic>> exchangeBoxToken({
+    required String code,
+    required String clientId,
+    String? clientSecret,
+    required String codeVerifier,
+    String? redirectUri,
+  }) async {
+    final body = {
+      'client_id': clientId,
+      'code': code,
+      'grant_type': 'authorization_code',
+      'code_verifier': codeVerifier,
+    };
+    if (clientSecret != null && clientSecret.isNotEmpty) {
+      body['client_secret'] = clientSecret;
+    }
+    if (redirectUri != null && redirectUri.isNotEmpty) {
+      body['redirect_uri'] = redirectUri;
+    }
+
+    final res = await postWithRetry(
+      Uri.parse('https://api.box.com/oauth2/token'),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: body,
+    );
+
+    if (res.statusCode != 200) {
+      throw Exception('Box 토큰 발급 실패 (${res.statusCode}): ${res.body}');
+    }
+    return jsonDecode(res.body);
+  }
+
+  /// Dropbox OAuth 토큰 교환
+  static Future<Map<String, dynamic>> exchangeDropboxToken({
+    required String code,
+    required String redirectUri,
+    required String clientId,
+    String? clientSecret,
+    required String codeVerifier,
+  }) async {
+    final body = {
+      'client_id': clientId,
+      'code': code,
+      'grant_type': 'authorization_code',
+      'redirect_uri': redirectUri,
+      'code_verifier': codeVerifier,
+    };
+    if (clientSecret != null && clientSecret.isNotEmpty) {
+      body['client_secret'] = clientSecret;
+    }
+
+    final res = await postWithRetry(
+      Uri.parse('https://api.dropboxapi.com/oauth2/token'),
+      headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+      body: body,
+    );
+
+    if (res.statusCode != 200) {
+      throw Exception('Dropbox 토큰 발급 실패 (${res.statusCode}): ${res.body}');
+    }
+    return jsonDecode(res.body);
+  }
 }

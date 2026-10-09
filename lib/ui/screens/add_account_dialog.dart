@@ -4,6 +4,8 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import '../../models/cloud_account.dart';
 import '../../services/account_manager.dart';
+import '../../services/box_service.dart';
+import '../../services/dropbox_service.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/oauth_helper.dart';
 import '../../services/onedrive_service.dart';
@@ -89,6 +91,10 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         await _authenticateGoogle();
       } else if (_selectedType == CloudType.oneDrive) {
         await _authenticateOneDrive();
+      } else if (_selectedType == CloudType.box) {
+        await _authenticateBox();
+      } else if (_selectedType == CloudType.dropbox) {
+        await _authenticateDropbox();
       } else if (_selectedType == CloudType.webDav) {
         await _saveWebDav();
       }
@@ -220,6 +226,115 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     }
   }
 
+  Future<void> _authenticateBox() async {
+    final clientId = _clientIdController.text.trim().isNotEmpty
+        ? _clientIdController.text.trim()
+        : BoxService.defaultClientId;
+    final clientSecret = _clientSecretController.text.trim().isNotEmpty
+        ? _clientSecretController.text.trim()
+        : null;
+
+    final codeVerifier = OAuthHelper.generateRandomString();
+    final codeChallenge = OAuthHelper.generateCodeChallenge(codeVerifier);
+
+    final params = {
+      'client_id': clientId,
+      'response_type': 'code',
+      'code_challenge': codeChallenge,
+      'code_challenge_method': 'S256',
+    };
+
+    final code = await OAuthHelper.authenticateWithLoopback(
+      authUrlWithoutParams: BoxService.authEndpoint,
+      params: params,
+      port: 53682,
+      redirectPath: '/',
+    );
+
+    if (code == null) throw Exception('인증 코드가 수신되지 않았습니다.');
+
+    setState(() => _statusMessage = '인증이 확인되었습니다. 토큰 발급 및 계정 등록 중...');
+    await Future.delayed(const Duration(milliseconds: 1200));
+    final tokenData = await OAuthHelper.exchangeBoxToken(
+      code: code,
+      clientId: clientId,
+      clientSecret: clientSecret,
+      codeVerifier: codeVerifier,
+      redirectUri: params['redirect_uri'],
+    );
+
+    final account = CloudAccount(
+      id: 'box_${DateTime.now().millisecondsSinceEpoch}',
+      name: 'Box (${DateTime.now().month}/${DateTime.now().day})',
+      type: CloudType.box,
+      email: '',
+      accessToken: tokenData['access_token'],
+      refreshToken: tokenData['refresh_token'],
+      tokenExpiry: DateTime.now().add(Duration(seconds: tokenData['expires_in'] as int? ?? 3600)),
+      customClientId: _clientIdController.text.trim(),
+      customClientSecret: _clientSecretController.text.trim(),
+    );
+
+    if (mounted) {
+      await context.read<AccountManager>().saveAccount(account);
+    }
+  }
+
+  Future<void> _authenticateDropbox() async {
+    final clientId = _clientIdController.text.trim().isNotEmpty
+        ? _clientIdController.text.trim()
+        : DropboxService.defaultClientId;
+    final clientSecret = _clientSecretController.text.trim().isNotEmpty
+        ? _clientSecretController.text.trim()
+        : null;
+
+    final codeVerifier = OAuthHelper.generateRandomString();
+    final codeChallenge = OAuthHelper.generateCodeChallenge(codeVerifier);
+
+    final params = {
+      'client_id': clientId,
+      'response_type': 'code',
+      'token_access_type': 'offline',
+      'code_challenge': codeChallenge,
+      'code_challenge_method': 'S256',
+    };
+
+    final code = await OAuthHelper.authenticateWithLoopback(
+      authUrlWithoutParams: DropboxService.authEndpoint,
+      params: params,
+      port: 53682,
+      redirectPath: '/',
+    );
+
+    if (code == null) throw Exception('인증 코드가 수신되지 않았습니다.');
+
+    setState(() => _statusMessage = '인증이 확인되었습니다. 토큰 발급 및 계정 등록 중...');
+    await Future.delayed(const Duration(milliseconds: 1200));
+    final tokenData = await OAuthHelper.exchangeDropboxToken(
+      code: code,
+      redirectUri: params['redirect_uri']!,
+      clientId: clientId,
+      clientSecret: clientSecret,
+      codeVerifier: codeVerifier,
+    );
+
+    final account = CloudAccount(
+      id: 'dropbox_${DateTime.now().millisecondsSinceEpoch}',
+      name: 'Dropbox (${DateTime.now().month}/${DateTime.now().day})',
+      type: CloudType.dropbox,
+      email: '',
+      accessToken: tokenData['access_token'],
+      refreshToken: tokenData['refresh_token'],
+      tokenExpiry: DateTime.now().add(Duration(seconds: tokenData['expires_in'] as int? ?? 14400)),
+      customClientId: _clientIdController.text.trim(),
+      customClientSecret: _clientSecretController.text.trim(),
+    );
+
+    if (mounted) {
+      await context.read<AccountManager>().saveAccount(account);
+    }
+  }
+
   Future<void> _saveWebDav() async {
     final url = _webDavUrlController.text.trim();
     if (url.isEmpty) throw Exception('WebDAV URL을 입력해주세요.');
@@ -263,29 +378,42 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
               ),
               const SizedBox(height: 20),
 
-              // 클라우드 서비스 선택 라디오
-              SegmentedButton<CloudType>(
-                segments: const [
-                  ButtonSegment(
-                    value: CloudType.googleDrive,
-                    label: Text('Google Drive'),
-                    icon: Icon(Icons.cloud_queue),
-                  ),
-                  ButtonSegment(
-                    value: CloudType.oneDrive,
-                    label: Text('OneDrive'),
-                    icon: Icon(Icons.cloud),
-                  ),
-                  ButtonSegment(
-                    value: CloudType.webDav,
-                    label: Text('WebDAV/네이버'),
-                    icon: Icon(Icons.dns),
-                  ),
-                ],
-                selected: {_selectedType},
-                onSelectionChanged: (set) {
-                  setState(() => _selectedType = set.first);
-                },
+              // 클라우드 서비스 선택
+              SingleChildScrollView(
+                scrollDirection: Axis.horizontal,
+                child: SegmentedButton<CloudType>(
+                  segments: const [
+                    ButtonSegment(
+                      value: CloudType.googleDrive,
+                      label: Text('Google Drive'),
+                      icon: Icon(Icons.cloud_queue),
+                    ),
+                    ButtonSegment(
+                      value: CloudType.oneDrive,
+                      label: Text('OneDrive'),
+                      icon: Icon(Icons.cloud),
+                    ),
+                    ButtonSegment(
+                      value: CloudType.box,
+                      label: Text('Box'),
+                      icon: Icon(Icons.inventory_2_outlined),
+                    ),
+                    ButtonSegment(
+                      value: CloudType.dropbox,
+                      label: Text('Dropbox'),
+                      icon: Icon(Icons.folder_shared_outlined),
+                    ),
+                    ButtonSegment(
+                      value: CloudType.webDav,
+                      label: Text('WebDAV / NAS'),
+                      icon: Icon(Icons.dns),
+                    ),
+                  ],
+                  selected: {_selectedType},
+                  onSelectionChanged: (set) {
+                    setState(() => _selectedType = set.first);
+                  },
+                ),
               ),
               const SizedBox(height: 20),
 

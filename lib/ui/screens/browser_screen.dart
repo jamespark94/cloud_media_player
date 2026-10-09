@@ -1602,6 +1602,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
         icon = Icons.cloud;
         color = Colors.blue;
         break;
+      case CloudType.box:
+        icon = Icons.inventory_2_outlined;
+        color = Colors.blue.shade600;
+        break;
+      case CloudType.dropbox:
+        icon = Icons.folder_shared_outlined;
+        color = Colors.indigoAccent;
+        break;
       case CloudType.webDav:
         icon = Icons.dns;
         color = Colors.teal;

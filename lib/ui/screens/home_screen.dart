@@ -1856,6 +1856,14 @@ class _HomeScreenState extends State<HomeScreen> {
         icon = Icons.cloud;
         color = Colors.blue;
         break;
+      case CloudType.box:
+        icon = Icons.inventory_2_outlined;
+        color = Colors.blue.shade600;
+        break;
+      case CloudType.dropbox:
+        icon = Icons.folder_shared_outlined;
+        color = Colors.indigoAccent;
+        break;
       case CloudType.webDav:
         icon = Icons.dns;
         color = Colors.teal;
@@ -1879,6 +1887,14 @@ class _HomeScreenState extends State<HomeScreen> {
       case CloudType.oneDrive:
         icon = Icons.cloud;
         color = Colors.blue;
+        break;
+      case CloudType.box:
+        icon = Icons.inventory_2_outlined;
+        color = Colors.blue.shade600;
+        break;
+      case CloudType.dropbox:
+        icon = Icons.folder_shared_outlined;
+        color = Colors.indigoAccent;
         break;
       case CloudType.webDav:
         icon = Icons.dns;
@@ -1912,6 +1928,14 @@ class _HomeScreenState extends State<HomeScreen> {
         icon = Icons.cloud;
         color = Colors.blue;
         break;
+      case CloudType.box:
+        icon = Icons.inventory_2_outlined;
+        color = Colors.blue.shade600;
+        break;
+      case CloudType.dropbox:
+        icon = Icons.folder_shared_outlined;
+        color = Colors.indigoAccent;
+        break;
       case CloudType.webDav:
         icon = Icons.dns;
         color = Colors.teal;
@@ -1936,6 +1960,10 @@ class _HomeScreenState extends State<HomeScreen> {
         return 'Google Drive';
       case CloudType.oneDrive:
         return 'Microsoft OneDrive';
+      case CloudType.box:
+        return 'Box';
+      case CloudType.dropbox:
+        return 'Dropbox';
       case CloudType.webDav:
         return 'WebDAV / NAS';
     }
@@ -2229,7 +2257,7 @@ class _HomeScreenState extends State<HomeScreen> {
                   child: const Icon(Icons.cloud_upload_outlined, color: Colors.blueAccent),
                 ),
                 title: const Text('클라우드 드라이브 연결', style: TextStyle(fontWeight: FontWeight.bold)),
-                subtitle: const Text('Google Drive, OneDrive, WebDAV 계정을 추가합니다.'),
+                subtitle: const Text('Google Drive, OneDrive, Box, Dropbox, WebDAV 계정을 추가합니다.'),
                 onTap: () {
                   Navigator.pop(ctx);
                   _openAddAccountDialog(context);

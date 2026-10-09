@@ -1,7 +1,9 @@
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/cloud_account.dart';
+import 'box_service.dart';
 import 'cloud_service_interface.dart';
+import 'dropbox_service.dart';
 import 'google_drive_service.dart';
 import 'local_disk_service.dart';
 import 'onedrive_service.dart';
@@ -70,6 +72,10 @@ class AccountManager extends ChangeNotifier {
         return OneDriveService(account, onAccountUpdated: saveAccount);
       case CloudType.webDav:
         return WebDavService(account, onAccountUpdated: saveAccount);
+      case CloudType.box:
+        return BoxService(account, onAccountUpdated: saveAccount);
+      case CloudType.dropbox:
+        return DropboxService(account, onAccountUpdated: saveAccount);
     }
   }
 }

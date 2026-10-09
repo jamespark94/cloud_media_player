@@ -4,6 +4,8 @@ enum CloudType {
   googleDrive,
   oneDrive,
   webDav,
+  box,
+  dropbox,
   local,
 }
 

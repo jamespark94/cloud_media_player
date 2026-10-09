@@ -66,6 +66,32 @@ class MediaItem {
         lowerName.endsWith('.vtt');
   }
 
+  /// 만화책 뷰어 재사용을 위한 압축파일/eBook 포맷 판별
+  bool get isComicArchive {
+    if (isFolder) return false;
+    final lowerName = name.toLowerCase();
+    return lowerName.endsWith('.zip') ||
+        lowerName.endsWith('.cbz') ||
+        lowerName.endsWith('.rar') ||
+        lowerName.endsWith('.cbr') ||
+        lowerName.endsWith('.7z') ||
+        lowerName.endsWith('.tar') ||
+        lowerName.endsWith('.pdf');
+  }
+
+  /// 이미지/단일 페이지 판별
+  bool get isImage {
+    if (isFolder) return false;
+    final lowerName = name.toLowerCase();
+    return lowerName.endsWith('.jpg') ||
+        lowerName.endsWith('.jpeg') ||
+        lowerName.endsWith('.png') ||
+        lowerName.endsWith('.webp') ||
+        lowerName.endsWith('.gif') ||
+        lowerName.endsWith('.avif') ||
+        lowerName.endsWith('.bmp');
+  }
+
   String get formattedSize {
     if (size == null || size == 0) return '';
     const suffixes = ['B', 'KB', 'MB', 'GB', 'TB'];
