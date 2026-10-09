@@ -34,7 +34,7 @@ class PlayerScreen extends StatefulWidget {
   State<PlayerScreen> createState() => _PlayerScreenState();
 }
 
-class _PlayerScreenState extends State<PlayerScreen> {
+class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver {
   late final Player _player;
   late final VideoController _controller;
   bool _isLoading = true;
@@ -93,6 +93,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _totalDuration = widget.item.duration ?? Duration.zero;
     _player = Player(
       configuration: const PlayerConfiguration(
@@ -453,6 +454,43 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _isFullScreen) {
+      _applyMobileFullScreen(true);
+    }
+  }
+
+  /// 모바일(Android/iOS) 전체화면 및 시스템 UI(상단바 날짜/배터리 등) 제어
+  Future<void> _applyMobileFullScreen(bool enable) async {
+    if (enable) {
+      // 1. Flutter SystemChrome 가로모드 및 ImmersiveSticky 모드 적용
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
+      await SystemChrome.setPreferredOrientations([
+        DeviceOrientation.landscapeLeft,
+        DeviceOrientation.landscapeRight,
+      ]);
+      // 2. Android 플랫폼 네이티브 WindowInsetsController로 시스템 상태바(시간/날짜/배터리) 완전 숨김
+      if (Platform.isAndroid) {
+        try {
+          const channel = MethodChannel('com.example.cloud_media_player/window');
+          await channel.invokeMethod('setFullScreen', {'enable': true});
+        } catch (_) {}
+      }
+    } else {
+      // 1. Flutter SystemChrome 복원
+      await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
+      await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+      // 2. Android 네이티브 상태바 복원
+      if (Platform.isAndroid) {
+        try {
+          const channel = MethodChannel('com.example.cloud_media_player/window');
+          await channel.invokeMethod('setFullScreen', {'enable': false});
+        } catch (_) {}
+      }
+    }
+  }
+
   Future<void> _toggleFullScreen() async {
     if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
       final isFull = await windowManager.isFullScreen();
@@ -464,16 +502,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     } else {
       final nextState = !_isFullScreen;
-      if (nextState) {
-        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-        await SystemChrome.setPreferredOrientations([
-          DeviceOrientation.landscapeLeft,
-          DeviceOrientation.landscapeRight,
-        ]);
-      } else {
-        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-        await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-      }
+      await _applyMobileFullScreen(nextState);
       if (mounted) {
         setState(() {
           _isFullScreen = nextState;
@@ -495,8 +524,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
       }
     } else {
       if (_isFullScreen) {
-        await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
-        await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
+        await _applyMobileFullScreen(false);
         if (mounted) {
           setState(() {
             _isFullScreen = false;
@@ -1175,6 +1203,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _gestureIndicatorTimer?.cancel();
     try {
       FlutterVolumeController.removeListener();
@@ -1206,12 +1235,17 @@ class _PlayerScreenState extends State<PlayerScreen> {
     return Scaffold(
       backgroundColor: Colors.black,
       body: PopScope(
-        canPop: true,
+        canPop: !_isFullScreen,
         onPopInvokedWithResult: (didPop, result) async {
-          if (!_hasCapturedThumbnail && _player.state.position >= const Duration(seconds: 2)) {
-            await _captureThumbnailIfNeeded(force: true);
+          if (didPop) {
+            _exitFullScreen();
+            if (!_hasCapturedThumbnail && _player.state.position >= const Duration(seconds: 2)) {
+              await _captureThumbnailIfNeeded(force: true);
+            }
+            _saveCurrentPosition();
+          } else if (_isFullScreen) {
+            await _exitFullScreen();
           }
-          _saveCurrentPosition();
         },
         child: CallbackShortcuts(
         bindings: {
