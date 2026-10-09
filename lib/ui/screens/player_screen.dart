@@ -5,6 +5,8 @@ import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:audio_session/audio_session.dart';
 import 'package:screen_brightness/screen_brightness.dart';
+import 'package:flutter_volume_controller/flutter_volume_controller.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -12,9 +14,11 @@ import '../../models/media_item.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/local_stream_proxy.dart';
 import '../../services/playback_history_service.dart';
+import '../../services/subtitle_settings_service.dart';
 import '../../utils/platform_utils.dart';
 import '../../utils/subtitle_utils.dart';
 import '../widgets/subtitle_dialog.dart';
+import '../widgets/custom_subtitle_view.dart';
 
 class PlayerScreen extends StatefulWidget {
   final MediaItem item;
@@ -195,7 +199,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
     _initAudioSession();
     _initBrightness();
-    _gestureVolume = _player.state.volume;
+    _initVolume();
+    SubtitleSettingsService.instance.init();
     _initAndPlay();
   }
 
@@ -501,7 +506,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
     }
   }
 
-  void _openSubtitleDialog() {
+  void _openSubtitleDialog({int initialTab = 0}) {
     _hideControlsTimer?.cancel();
     showDialog(
       context: context,
@@ -509,6 +514,7 @@ class _PlayerScreenState extends State<PlayerScreen> {
         player: _player,
         item: widget.item,
         service: widget.service,
+        initialTabIndex: initialTab,
         onSubtitleChanged: (type, id, name, language) {
           _currentSubtitleType = type;
           _currentSubtitleId = id;
@@ -1069,41 +1075,88 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
-  /// 화면 밝기 초기화 (시스템/앱 현재 밝기 읽기)
+  /// 화면 밝기 초기화 (저장된 밝기 유지 또는 시스템/앱 현재 밝기 읽기)
   Future<void> _initBrightness() async {
     try {
-      final b = await ScreenBrightness().application;
-      if (mounted) {
-        setState(() {
-          _brightness = b.clamp(0.01, 1.0);
-        });
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getDouble('player_saved_brightness');
+      if (saved != null) {
+        _brightness = saved.clamp(0.01, 1.0);
+      } else {
+        final b = await ScreenBrightness().application;
+        _brightness = b.clamp(0.01, 1.0);
       }
+      if (mounted) {
+        setState(() {});
+      }
+      await ScreenBrightness().setApplicationScreenBrightness(_brightness);
     } catch (_) {
       _brightness = 0.5;
     }
   }
 
-  /// 제스처에 의한 화면 밝기 변경 (0.01 ~ 1.0)
+  /// 제스처에 의한 화면 밝기 변경 (0.01 ~ 1.0) 및 영구 저장 (플레이 중지 후 재시작 시 유지)
   Future<void> _setBrightness(double value) async {
+    final clamped = value.clamp(0.01, 1.0);
     setState(() {
-      _brightness = value;
+      _brightness = clamped;
       _showBrightnessIndicator = true;
       _showVolumeIndicator = false;
     });
     try {
-      await ScreenBrightness().setApplicationScreenBrightness(value);
+      await ScreenBrightness().setApplicationScreenBrightness(clamped);
+    } catch (_) {}
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setDouble('player_saved_brightness', clamped);
     } catch (_) {}
     _startGestureDismissTimer();
   }
 
-  /// 제스처에 의한 볼륨 변경 (0.0 ~ 100.0)
+  /// 시스템 볼륨 초기화 및 기기 볼륨 리스너 등록
+  Future<void> _initVolume() async {
+    try {
+      await FlutterVolumeController.updateShowSystemUI(false);
+      final sysVol = await FlutterVolumeController.getVolume();
+      if (sysVol != null && mounted) {
+        setState(() {
+          _gestureVolume = (sysVol * 100.0).clamp(0.0, 100.0);
+        });
+      }
+    } catch (_) {
+      _gestureVolume = 100.0;
+    }
+
+    try {
+      FlutterVolumeController.addListener((volume) {
+        if (mounted) {
+          setState(() {
+            _gestureVolume = (volume * 100.0).clamp(0.0, 100.0);
+          });
+        }
+      });
+    } catch (_) {}
+
+    // 플레이어 소프트웨어 볼륨은 100%로 설정하여 왜곡 없이 시스템 볼륨과 1:1 매핑
+    try {
+      await _player.setVolume(100.0);
+    } catch (_) {}
+  }
+
+  /// 제스처에 의한 시스템 볼륨 변경 (0.0 ~ 100.0)
   Future<void> _setVolume(double value) async {
+    final clamped = value.clamp(0.0, 100.0);
     setState(() {
-      _gestureVolume = value;
+      _gestureVolume = clamped;
       _showVolumeIndicator = true;
       _showBrightnessIndicator = false;
     });
-    await _player.setVolume(value);
+    try {
+      await FlutterVolumeController.setVolume(clamped / 100.0);
+    } catch (_) {
+      // 기기 시스템 볼륨 제어 실패 시 플레이어 내부 볼륨 폴백
+      await _player.setVolume(clamped);
+    }
     _startGestureDismissTimer();
   }
 
@@ -1123,6 +1176,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
   @override
   void dispose() {
     _gestureIndicatorTimer?.cancel();
+    try {
+      FlutterVolumeController.removeListener();
+    } catch (_) {}
     try {
       ScreenBrightness().resetApplicationScreenBrightness();
     } catch (_) {}
@@ -1233,8 +1289,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
                   final newB = (_brightness + delta).clamp(0.01, 1.0);
                   _setBrightness(newB);
                 } else if (_isDraggingRight) {
-                  // 화면 오른쪽: 볼륨 조절 (0.0 ~ 100.0)
-                  final newV = (_player.state.volume + delta * 100).clamp(0.0, 100.0);
+                  // 화면 오른쪽: 시스템 볼륨 조절 (0.0 ~ 100.0)
+                  final newV = (_gestureVolume + delta * 100).clamp(0.0, 100.0);
                   _setVolume(newV);
                 }
               },
@@ -1256,10 +1312,14 @@ class _PlayerScreenState extends State<PlayerScreen> {
                     child: Video(
                       controller: _controller,
                       controls: NoVideoControls,
+                      subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
                     ),
                   ),
 
-                  // 1-1. 소프트웨어 밝기 필터 오버레이 (하드웨어 백라이트 보완 및 데스크톱 지원)
+                  // 1-1. 커스텀 자막 오버레이 (크기, 위치, 글자색, 배경색 & 투명도 완벽 지원)
+                  CustomSubtitleView(player: _player),
+
+                  // 1-2. 소프트웨어 밝기 필터 오버레이 (하드웨어 백라이트 보완 및 데스크톱 지원)
                   if (_brightness < 1.0)
                     Positioned.fill(
                       child: IgnorePointer(
