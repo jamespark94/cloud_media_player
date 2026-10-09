@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:audio_session/audio_session.dart';
+import 'package:screen_brightness/screen_brightness.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -57,6 +58,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
   // 하드웨어 가속 상태 관리
   bool _isHwDec = true;
+
+  // 제스처 기반 화면 밝기 및 볼륨 조절 상태
+  double _brightness = 0.5;
+  double _gestureVolume = 100.0;
+  bool _showBrightnessIndicator = false;
+  bool _showVolumeIndicator = false;
+  Timer? _gestureIndicatorTimer;
+  bool _isDraggingLeft = false;
+  bool _isDraggingRight = false;
 
   // 이전 시청 시 사용한 자막 파일 및 언어 설정 기억 변수
   String? _currentSubtitleType;
@@ -184,6 +194,8 @@ class _PlayerScreenState extends State<PlayerScreen> {
     });
 
     _initAudioSession();
+    _initBrightness();
+    _gestureVolume = _player.state.volume;
     _initAndPlay();
   }
 
@@ -1057,8 +1069,63 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
+  /// 화면 밝기 초기화 (시스템/앱 현재 밝기 읽기)
+  Future<void> _initBrightness() async {
+    try {
+      final b = await ScreenBrightness().application;
+      if (mounted) {
+        setState(() {
+          _brightness = b.clamp(0.01, 1.0);
+        });
+      }
+    } catch (_) {
+      _brightness = 0.5;
+    }
+  }
+
+  /// 제스처에 의한 화면 밝기 변경 (0.01 ~ 1.0)
+  Future<void> _setBrightness(double value) async {
+    setState(() {
+      _brightness = value;
+      _showBrightnessIndicator = true;
+      _showVolumeIndicator = false;
+    });
+    try {
+      await ScreenBrightness().setApplicationScreenBrightness(value);
+    } catch (_) {}
+    _startGestureDismissTimer();
+  }
+
+  /// 제스처에 의한 볼륨 변경 (0.0 ~ 100.0)
+  Future<void> _setVolume(double value) async {
+    setState(() {
+      _gestureVolume = value;
+      _showVolumeIndicator = true;
+      _showBrightnessIndicator = false;
+    });
+    await _player.setVolume(value);
+    _startGestureDismissTimer();
+  }
+
+  /// 제스처 인디케이터 오버레이 자동 숨김 타이머 (1.2초)
+  void _startGestureDismissTimer() {
+    _gestureIndicatorTimer?.cancel();
+    _gestureIndicatorTimer = Timer(const Duration(milliseconds: 1200), () {
+      if (mounted) {
+        setState(() {
+          _showBrightnessIndicator = false;
+          _showVolumeIndicator = false;
+        });
+      }
+    });
+  }
+
   @override
   void dispose() {
+    _gestureIndicatorTimer?.cancel();
+    try {
+      ScreenBrightness().resetApplicationScreenBrightness();
+    } catch (_) {}
     _interruptionSub?.cancel();
     _becomingNoisySub?.cancel();
     _playingSub?.cancel();
@@ -1145,6 +1212,42 @@ class _PlayerScreenState extends State<PlayerScreen> {
             child: GestureDetector(
               onTap: _toggleControls,
               onDoubleTap: _toggleFullScreen,
+              onVerticalDragStart: (details) {
+                final size = MediaQuery.of(context).size;
+                final x = details.localPosition.dx;
+                if (x < size.width / 2) {
+                  _isDraggingLeft = true;
+                  _isDraggingRight = false;
+                } else {
+                  _isDraggingRight = true;
+                  _isDraggingLeft = false;
+                }
+                _gestureIndicatorTimer?.cancel();
+              },
+              onVerticalDragUpdate: (details) {
+                final size = MediaQuery.of(context).size;
+                final delta = -details.primaryDelta! / (size.height * 0.75);
+
+                if (_isDraggingLeft) {
+                  // 화면 왼쪽: 밝기 조절 (0.01 ~ 1.0)
+                  final newB = (_brightness + delta).clamp(0.01, 1.0);
+                  _setBrightness(newB);
+                } else if (_isDraggingRight) {
+                  // 화면 오른쪽: 볼륨 조절 (0.0 ~ 100.0)
+                  final newV = (_player.state.volume + delta * 100).clamp(0.0, 100.0);
+                  _setVolume(newV);
+                }
+              },
+              onVerticalDragEnd: (details) {
+                _isDraggingLeft = false;
+                _isDraggingRight = false;
+                _startGestureDismissTimer();
+              },
+              onVerticalDragCancel: () {
+                _isDraggingLeft = false;
+                _isDraggingRight = false;
+                _startGestureDismissTimer();
+              },
               behavior: HitTestBehavior.opaque,
               child: Stack(
                 children: [
@@ -1155,6 +1258,18 @@ class _PlayerScreenState extends State<PlayerScreen> {
                       controls: NoVideoControls,
                     ),
                   ),
+
+                  // 1-1. 소프트웨어 밝기 필터 오버레이 (하드웨어 백라이트 보완 및 데스크톱 지원)
+                  if (_brightness < 1.0)
+                    Positioned.fill(
+                      child: IgnorePointer(
+                        child: Container(
+                          color: Colors.black.withValues(
+                            alpha: (1.0 - _brightness).clamp(0.0, 0.75),
+                          ),
+                        ),
+                      ),
+                    ),
 
                   // 2. 로딩 인디케이터
                   if (_isLoading)
@@ -1254,6 +1369,9 @@ class _PlayerScreenState extends State<PlayerScreen> {
 
                   // 5. 알림 배너 (반투명 오버레이 & 자동 소멸)
                   _buildNotificationBanner(),
+
+                  // 6. 제스처 밝기 및 볼륨 인디케이터 오버레이
+                  _buildGestureIndicators(),
                 ],
               ),
             ),
@@ -1263,6 +1381,120 @@ class _PlayerScreenState extends State<PlayerScreen> {
     ),
   );
 }
+
+  /// 화면 왼쪽(밝기) 및 오른쪽(볼륨) 제스처 조절 시 표시되는 세로형 피드백 인디케이터
+  Widget _buildGestureIndicators() {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: Stack(
+          children: [
+            // 좌측 밝기 인디케이터
+            if (_showBrightnessIndicator)
+              Positioned(
+                left: 36,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: _buildVerticalIndicator(
+                    icon: _brightness < 0.33
+                        ? Icons.brightness_low
+                        : (_brightness < 0.66
+                            ? Icons.brightness_medium
+                            : Icons.brightness_high),
+                    iconColor: Colors.amberAccent,
+                    percent: _brightness,
+                    label: '${(_brightness * 100).round()}%',
+                  ),
+                ),
+              ),
+
+            // 우측 볼륨 인디케이터
+            if (_showVolumeIndicator)
+              Positioned(
+                right: 36,
+                top: 0,
+                bottom: 0,
+                child: Center(
+                  child: _buildVerticalIndicator(
+                    icon: _gestureVolume == 0
+                        ? Icons.volume_off
+                        : (_gestureVolume < 50
+                            ? Icons.volume_down
+                            : Icons.volume_up),
+                    iconColor: Colors.lightBlueAccent,
+                    percent: _gestureVolume / 100.0,
+                    label: '${_gestureVolume.round()}%',
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildVerticalIndicator({
+    required IconData icon,
+    required Color iconColor,
+    required double percent,
+    required String label,
+  }) {
+    final clampedPercent = percent.clamp(0.0, 1.0);
+    return Container(
+      width: 68,
+      padding: const EdgeInsets.symmetric(vertical: 18, horizontal: 8),
+      decoration: BoxDecoration(
+        color: Colors.black.withValues(alpha: 0.78),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: Colors.white.withValues(alpha: 0.18), width: 1),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withValues(alpha: 0.55),
+            blurRadius: 16,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Icon(icon, color: iconColor, size: 28),
+          const SizedBox(height: 14),
+          // 세로형 프로그레스 바
+          Container(
+            width: 8,
+            height: 90,
+            decoration: BoxDecoration(
+              color: Colors.white.withValues(alpha: 0.2),
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Stack(
+              alignment: Alignment.bottomCenter,
+              children: [
+                Container(
+                  height: 90 * clampedPercent,
+                  decoration: BoxDecoration(
+                    color: iconColor,
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          const SizedBox(height: 14),
+          Text(
+            label,
+            style: const TextStyle(
+              color: Colors.white,
+              fontSize: 12,
+              fontWeight: FontWeight.bold,
+              letterSpacing: 0.5,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
 
   Widget _buildNotificationBanner() {
     if (_bannerMessage == null) return const SizedBox.shrink();
