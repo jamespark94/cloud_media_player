@@ -3,6 +3,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 import '../models/cloud_account.dart';
 import 'cloud_service_interface.dart';
 import 'google_drive_service.dart';
+import 'local_disk_service.dart';
 import 'onedrive_service.dart';
 import 'webdav_service.dart';
 
@@ -10,7 +11,21 @@ class AccountManager extends ChangeNotifier {
   static const String _storageKey = 'saved_cloud_accounts';
   List<CloudAccount> _accounts = [];
 
+  /// 가상의 내 기기(로컬 저장소) 기본 계정
+  static final CloudAccount localAccount = CloudAccount(
+    id: 'local',
+    name: '내 PC (로컬 저장소)',
+    type: CloudType.local,
+    email: '로컬 드라이브 및 내 파일',
+    accessToken: '',
+  );
+
   List<CloudAccount> get accounts => List.unmodifiable(_accounts);
+
+  CloudAccount? getAccountById(String id) {
+    if (id == 'local') return localAccount;
+    return _accounts.cast<CloudAccount?>().firstWhere((a) => a?.id == id, orElse: () => null);
+  }
 
   Future<void> loadAccounts() async {
     final prefs = await SharedPreferences.getInstance();
@@ -47,6 +62,8 @@ class AccountManager extends ChangeNotifier {
 
   CloudService getService(CloudAccount account) {
     switch (account.type) {
+      case CloudType.local:
+        return LocalDiskService(account, onAccountUpdated: saveAccount);
       case CloudType.googleDrive:
         return GoogleDriveService(account, onAccountUpdated: saveAccount);
       case CloudType.oneDrive:

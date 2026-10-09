@@ -3,11 +3,14 @@ import 'package:flutter/material.dart';
 import 'package:http/http.dart' as http;
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:file_picker/file_picker.dart';
 import '../../models/cloud_account.dart';
 import '../../models/folder_shortcut.dart';
+import '../../models/media_item.dart';
 import '../../services/account_manager.dart';
 import '../../services/folder_shortcut_manager.dart';
 import '../../services/playback_history_service.dart';
+import '../../utils/permission_utils.dart';
 import 'add_account_dialog.dart';
 import 'add_folder_shortcut_dialog.dart';
 import 'browser_screen.dart';
@@ -140,76 +143,40 @@ class _HomeScreenState extends State<HomeScreen> {
               );
             }).toList(),
           ),
-          const SizedBox(width: 6),
-          if (accounts.isNotEmpty)
-            IconButton(
-              icon: const Icon(Icons.bookmark_add_outlined),
-              tooltip: '폴더 바로가기 추가',
-              onPressed: () => _openAddFolderShortcutDialog(context),
-            ),
+          const SizedBox(width: 4),
           IconButton(
-            icon: const Icon(Icons.add),
-            tooltip: '클라우드 드라이브 추가',
+            icon: const Icon(Icons.file_open_outlined),
+            tooltip: '로컬 파일 직접 열기',
+            onPressed: () => _pickAndPlayLocalFile(context, accountManager),
+          ),
+          IconButton(
+            icon: const Icon(Icons.bookmark_add_outlined),
+            tooltip: '폴더 바로가기 추가',
+            onPressed: () => _openAddFolderShortcutDialog(context),
+          ),
+          IconButton(
+            icon: const Icon(Icons.cloud_upload_outlined),
+            tooltip: '클라우드 드라이브 연결',
             onPressed: () => _openAddAccountDialog(context),
           ),
           const SizedBox(width: 8),
         ],
       ),
-      body: accounts.isEmpty
-          ? _buildEmptyState(context)
-          : _buildHomeContent(context, accounts, accountManager, shortcutManager, historyService),
+      body: _buildHomeContent(context, accounts, accountManager, shortcutManager, historyService),
       floatingActionButton: FloatingActionButton.extended(
-        onPressed: () => _openAddAccountDialog(context),
-        icon: const Icon(Icons.add),
-        label: const Text('클라우드 드라이브 추가'),
+        onPressed: () => _showQuickActionSheet(context, accountManager),
+        icon: const Icon(Icons.add_circle_outline),
+        label: const Text('열기 / 소스 추가'),
       ),
     );
   }
 
-  Widget _buildEmptyState(BuildContext context) {
-    return Center(
-      child: Padding(
-        padding: const EdgeInsets.all(32.0),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Container(
-              padding: const EdgeInsets.all(24),
-              decoration: BoxDecoration(
-                color: Colors.blueAccent.withAlpha(20),
-                shape: BoxShape.circle,
-              ),
-              child: const Icon(Icons.cloud_upload_outlined, size: 72, color: Colors.blueAccent),
-            ),
-            const SizedBox(height: 24),
-            const Text(
-              '연결된 클라우드 드라이브가 없습니다',
-              style: TextStyle(fontSize: 20, fontWeight: FontWeight.bold),
-            ),
-            const SizedBox(height: 12),
-            const Text(
-              '구글 드라이브, 원드라이브, 또는 WebDAV/네이버 브릿지를 연결하여\n저장된 동영상을 광고 없이 즉시 스트리밍하세요.',
-              textAlign: TextAlign.center,
-              style: TextStyle(color: Colors.grey, height: 1.5),
-            ),
-            const SizedBox(height: 28),
-            ElevatedButton.icon(
-              onPressed: () => _openAddAccountDialog(context),
-              icon: const Icon(Icons.add),
-              label: const Text('첫 번째 드라이브 연결하기'),
-              style: ElevatedButton.styleFrom(
-                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 14),
-                textStyle: const TextStyle(fontSize: 15, fontWeight: FontWeight.bold),
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
+
 
   void _prefetchMissingThumbnails(List<PlaybackRecord> records, AccountManager accountManager) {
     for (final record in records) {
+      if (record.accountId == 'local') continue;
+
       // 1. 이미 로컬 캡처 또는 캐시된 썸네일 이미지가 디스크에 정상 존재하는 경우 건너뜀
       if (record.localThumbnailPath != null && File(record.localThumbnailPath!).existsSync()) {
         continue;
@@ -220,10 +187,7 @@ class _HomeScreenState extends State<HomeScreen> {
       if (_prefetchedThumbnailKeys.contains(key)) continue;
       _prefetchedThumbnailKeys.add(key);
 
-      final account = accountManager.accounts.cast<CloudAccount?>().firstWhere(
-        (a) => a?.id == record.accountId,
-        orElse: () => null,
-      );
+      final account = accountManager.getAccountById(record.accountId);
       if (account == null) continue;
 
       final service = accountManager.getService(account);
@@ -392,9 +356,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 플레이 히스토리 - 큰 아이콘
   Widget _buildHistoryLargeCard(BuildContext context, PlaybackRecord record, AccountManager accountManager) {
-    final account = accountManager.accounts.cast<CloudAccount?>().firstWhere((a) => a?.id == record.accountId, orElse: () => null);
-    final accountName = account?.name ?? '클라우드';
-    final cloudType = account?.type ?? CloudType.googleDrive;
+    final account = accountManager.getAccountById(record.accountId);
+    final accountName = account?.name ?? (record.accountId == 'local' ? '내 PC' : '클라우드');
+    final cloudType = account?.type ?? (record.accountId == 'local' ? CloudType.local : CloudType.googleDrive);
     final isFinished = record.progress >= 0.95 || (record.durationMillis > 0 && record.positionMillis == 0);
 
     return Card(
@@ -601,9 +565,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 플레이 히스토리 - 작은 아이콘
   Widget _buildHistorySmallCard(BuildContext context, PlaybackRecord record, AccountManager accountManager) {
-    final account = accountManager.accounts.cast<CloudAccount?>().firstWhere((a) => a?.id == record.accountId, orElse: () => null);
-    final accountName = account?.name ?? '클라우드';
-    final cloudType = account?.type ?? CloudType.googleDrive;
+    final account = accountManager.getAccountById(record.accountId);
+    final accountName = account?.name ?? (record.accountId == 'local' ? '내 PC' : '클라우드');
+    final cloudType = account?.type ?? (record.accountId == 'local' ? CloudType.local : CloudType.googleDrive);
     final isFinished = record.progress >= 0.95 || (record.durationMillis > 0 && record.positionMillis == 0);
 
     return Card(
@@ -808,9 +772,9 @@ class _HomeScreenState extends State<HomeScreen> {
 
   // 플레이 히스토리 - 목록
   Widget _buildHistoryListRow(BuildContext context, PlaybackRecord record, AccountManager accountManager) {
-    final account = accountManager.accounts.cast<CloudAccount?>().firstWhere((a) => a?.id == record.accountId, orElse: () => null);
-    final accountName = account?.name ?? '클라우드';
-    final cloudType = account?.type ?? CloudType.googleDrive;
+    final account = accountManager.getAccountById(record.accountId);
+    final accountName = account?.name ?? (record.accountId == 'local' ? '내 PC' : '클라우드');
+    final cloudType = account?.type ?? (record.accountId == 'local' ? CloudType.local : CloudType.googleDrive);
     final isFinished = record.progress >= 0.95 || (record.durationMillis > 0 && record.positionMillis == 0);
 
     return Container(
@@ -900,9 +864,9 @@ class _HomeScreenState extends State<HomeScreen> {
           const Divider(height: 1, color: Colors.white12),
           // 테이블 데이터 행들
           ...records.map((record) {
-            final account = accountManager.accounts.cast<CloudAccount?>().firstWhere((a) => a?.id == record.accountId, orElse: () => null);
-            final accountName = account?.name ?? '클라우드';
-            final cloudType = account?.type ?? CloudType.googleDrive;
+            final account = accountManager.getAccountById(record.accountId);
+            final accountName = account?.name ?? (record.accountId == 'local' ? '내 PC' : '클라우드');
+            final cloudType = account?.type ?? (record.accountId == 'local' ? CloudType.local : CloudType.googleDrive);
             final isFinished = record.progress >= 0.95 || (record.durationMillis > 0 && record.positionMillis == 0);
             final percent = (record.progress * 100).toInt();
 
@@ -1435,6 +1399,9 @@ class _HomeScreenState extends State<HomeScreen> {
     List<CloudAccount> accounts,
     AccountManager accountManager,
   ) {
+    // 로컬 저장소를 최상단 기본 소스로 포함하여 통합 제공
+    final allStorages = [AccountManager.localAccount, ...accounts];
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -1443,18 +1410,18 @@ class _HomeScreenState extends State<HomeScreen> {
           children: [
             Row(
               children: [
-                const Icon(Icons.cloud_queue, size: 20, color: Colors.blueAccent),
+                const Icon(Icons.storage_rounded, size: 20, color: Colors.blueAccent),
                 const SizedBox(width: 8),
                 Text(
-                  '연결된 클라우드 드라이브 (${accounts.length})',
+                  '저장소 및 드라이브 (${allStorages.length})',
                   style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
                 ),
               ],
             ),
             TextButton.icon(
               onPressed: () => _openAddAccountDialog(context),
-              icon: const Icon(Icons.add, size: 16),
-              label: const Text('드라이브 추가'),
+              icon: const Icon(Icons.cloud_upload_outlined, size: 16),
+              label: const Text('클라우드 연결'),
               style: TextButton.styleFrom(
                 foregroundColor: Colors.blueAccent,
                 visualDensity: VisualDensity.compact,
@@ -1478,8 +1445,8 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisSpacing: 10,
                     mainAxisSpacing: 10,
                   ),
-                  itemCount: accounts.length,
-                  itemBuilder: (context, i) => _buildAccountLargeCard(context, accounts[i], accountManager),
+                  itemCount: allStorages.length,
+                  itemBuilder: (context, i) => _buildAccountLargeCard(context, allStorages[i], accountManager),
                 );
 
               case HomeViewMode.smallIcons:
@@ -1493,34 +1460,87 @@ class _HomeScreenState extends State<HomeScreen> {
                     crossAxisSpacing: 8,
                     mainAxisSpacing: 8,
                   ),
-                  itemCount: accounts.length,
-                  itemBuilder: (context, i) => _buildAccountSmallCard(context, accounts[i], accountManager),
+                  itemCount: allStorages.length,
+                  itemBuilder: (context, i) => _buildAccountSmallCard(context, allStorages[i], accountManager),
                 );
 
               case HomeViewMode.list:
                 return Column(
-                  children: accounts
+                  children: allStorages
                       .map((acc) => _buildAccountListRow(context, acc, accountManager))
                       .toList(),
                 );
 
               case HomeViewMode.details:
-                return _buildAccountDetailsTable(context, accounts, accountManager);
+                return _buildAccountDetailsTable(context, allStorages, accountManager);
             }
           },
         ),
+
+        // 등록된 클라우드 계정이 없을 때 안내 배너
+        if (accounts.isEmpty) ...[
+          const SizedBox(height: 12),
+          Container(
+            padding: const EdgeInsets.all(14),
+            decoration: BoxDecoration(
+              color: Colors.blueAccent.withAlpha(15),
+              borderRadius: BorderRadius.circular(10),
+              border: Border.all(color: Colors.blueAccent.withAlpha(40)),
+            ),
+            child: Row(
+              children: [
+                const Icon(Icons.cloud_upload_outlined, color: Colors.blueAccent, size: 28),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: const [
+                      Text(
+                        '클라우드 드라이브도 함께 연결해 보세요',
+                        style: TextStyle(fontSize: 13, fontWeight: FontWeight.bold, color: Colors.white),
+                      ),
+                      SizedBox(height: 2),
+                      Text(
+                        'Google Drive, OneDrive, WebDAV 등을 등록하면 어디서든 영상을 스트리밍할 수 있습니다.',
+                        style: TextStyle(fontSize: 11, color: Colors.white60),
+                      ),
+                    ],
+                  ),
+                ),
+                const SizedBox(width: 8),
+                ElevatedButton.icon(
+                  onPressed: () => _openAddAccountDialog(context),
+                  icon: const Icon(Icons.add, size: 14),
+                  label: const Text('클라우드 추가'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.blueAccent,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                    textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
       ],
     );
   }
 
-  // 클라우드 드라이브 - 큰 아이콘
+  // 저장소 / 드라이브 - 큰 아이콘
   Widget _buildAccountLargeCard(BuildContext context, CloudAccount account, AccountManager accountManager) {
     final service = accountManager.getService(account);
+    final isLocal = account.type == CloudType.local;
 
     return Card(
       elevation: 2,
       margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(12),
+        side: isLocal
+            ? BorderSide(color: Colors.tealAccent.withAlpha(80), width: 1.2)
+            : BorderSide.none,
+      ),
       color: const Color(0xFF1E2430),
       child: InkWell(
         borderRadius: BorderRadius.circular(12),
@@ -1543,8 +1563,11 @@ class _HomeScreenState extends State<HomeScreen> {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    _getTypeDisplayName(account.type),
-                    style: const TextStyle(fontSize: 11, color: Colors.grey),
+                    isLocal ? '로컬 드라이브 및 내 폴더' : _getTypeDisplayName(account.type),
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: isLocal ? Colors.tealAccent.shade100 : Colors.grey,
+                    ),
                     overflow: TextOverflow.ellipsis,
                   ),
                 ],
@@ -1553,13 +1576,21 @@ class _HomeScreenState extends State<HomeScreen> {
             Positioned(
               top: 2,
               right: 2,
-              child: IconButton(
-                icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
-                tooltip: '계정 삭제',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                onPressed: () => _confirmDelete(context, account, accountManager),
-              ),
+              child: isLocal
+                  ? IconButton(
+                      icon: const Icon(Icons.file_open_outlined, size: 16, color: Colors.tealAccent),
+                      tooltip: '로컬 파일 직접 열기',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      onPressed: () => _pickAndPlayLocalFile(context, accountManager),
+                    )
+                  : IconButton(
+                      icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                      tooltip: '계정 삭제',
+                      padding: EdgeInsets.zero,
+                      constraints: const BoxConstraints(),
+                      onPressed: () => _confirmDelete(context, account, accountManager),
+                    ),
             ),
           ],
         ),
@@ -1567,14 +1598,20 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 클라우드 드라이브 - 작은 아이콘
+  // 저장소 / 드라이브 - 작은 아이콘
   Widget _buildAccountSmallCard(BuildContext context, CloudAccount account, AccountManager accountManager) {
     final service = accountManager.getService(account);
+    final isLocal = account.type == CloudType.local;
 
     return Card(
       elevation: 1,
       margin: EdgeInsets.zero,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+      shape: RoundedRectangleBorder(
+        borderRadius: BorderRadius.circular(8),
+        side: isLocal
+            ? BorderSide(color: Colors.tealAccent.withAlpha(70), width: 1)
+            : BorderSide.none,
+      ),
       color: const Color(0xFF1E2430),
       child: InkWell(
         borderRadius: BorderRadius.circular(8),
@@ -1597,19 +1634,31 @@ class _HomeScreenState extends State<HomeScreen> {
                       overflow: TextOverflow.ellipsis,
                     ),
                     Text(
-                      _getTypeDisplayName(account.type),
-                      style: const TextStyle(fontSize: 10, color: Colors.white54),
+                      isLocal ? '로컬 드라이브 및 내 폴더' : _getTypeDisplayName(account.type),
+                      style: TextStyle(
+                        fontSize: 10,
+                        color: isLocal ? Colors.tealAccent.shade100 : Colors.white54,
+                      ),
                     ),
                   ],
                 ),
               ),
-              IconButton(
-                icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent),
-                tooltip: '삭제',
-                padding: EdgeInsets.zero,
-                constraints: const BoxConstraints(),
-                onPressed: () => _confirmDelete(context, account, accountManager),
-              ),
+              if (isLocal)
+                IconButton(
+                  icon: const Icon(Icons.file_open_outlined, size: 15, color: Colors.tealAccent),
+                  tooltip: '로컬 파일 열기',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: () => _pickAndPlayLocalFile(context, accountManager),
+                )
+              else
+                IconButton(
+                  icon: const Icon(Icons.delete_outline, size: 14, color: Colors.redAccent),
+                  tooltip: '삭제',
+                  padding: EdgeInsets.zero,
+                  constraints: const BoxConstraints(),
+                  onPressed: () => _confirmDelete(context, account, accountManager),
+                ),
             ],
           ),
         ),
@@ -1617,16 +1666,19 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 클라우드 드라이브 - 목록
+  // 저장소 / 드라이브 - 목록
   Widget _buildAccountListRow(BuildContext context, CloudAccount account, AccountManager accountManager) {
     final service = accountManager.getService(account);
+    final isLocal = account.type == CloudType.local;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 4),
       decoration: BoxDecoration(
         color: const Color(0xFF1A1F2B),
         borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: Colors.white10),
+        border: Border.all(
+          color: isLocal ? Colors.tealAccent.withAlpha(50) : Colors.white10,
+        ),
       ),
       child: ListTile(
         dense: true,
@@ -1636,15 +1688,28 @@ class _HomeScreenState extends State<HomeScreen> {
           account.name,
           style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
         ),
-        subtitle: Text(_getTypeDisplayName(account.type), style: const TextStyle(fontSize: 11, color: Colors.grey)),
+        subtitle: Text(
+          isLocal ? '로컬 디스크 및 사용자 폴더' : _getTypeDisplayName(account.type),
+          style: TextStyle(
+            fontSize: 11,
+            color: isLocal ? Colors.tealAccent.shade100 : Colors.grey,
+          ),
+        ),
         trailing: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            IconButton(
-              icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 18),
-              tooltip: '계정 삭제',
-              onPressed: () => _confirmDelete(context, account, accountManager),
-            ),
+            if (isLocal)
+              IconButton(
+                icon: const Icon(Icons.file_open_outlined, color: Colors.tealAccent, size: 18),
+                tooltip: '로컬 파일 열기',
+                onPressed: () => _pickAndPlayLocalFile(context, accountManager),
+              )
+            else
+              IconButton(
+                icon: const Icon(Icons.delete_outline, color: Colors.redAccent, size: 18),
+                tooltip: '계정 삭제',
+                onPressed: () => _confirmDelete(context, account, accountManager),
+              ),
             const Icon(Icons.chevron_right, color: Colors.grey, size: 18),
           ],
         ),
@@ -1653,7 +1718,7 @@ class _HomeScreenState extends State<HomeScreen> {
     );
   }
 
-  // 클라우드 드라이브 - 자세히 (Table)
+  // 저장소 / 드라이브 - 자세히 (Table)
   Widget _buildAccountDetailsTable(BuildContext context, List<CloudAccount> accounts, AccountManager accountManager) {
     return Container(
       decoration: BoxDecoration(
@@ -1672,8 +1737,8 @@ class _HomeScreenState extends State<HomeScreen> {
             ),
             child: Row(
               children: const [
-                Expanded(flex: 4, child: Text('드라이브명', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
-                Expanded(flex: 3, child: Text('서비스 종류', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
+                Expanded(flex: 4, child: Text('저장소명', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
+                Expanded(flex: 3, child: Text('종류', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
                 Expanded(flex: 3, child: Text('상태', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
                 SizedBox(width: 50, child: Text('관리', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
               ],
@@ -1683,6 +1748,8 @@ class _HomeScreenState extends State<HomeScreen> {
           // 행 데이터
           ...accounts.map((account) {
             final service = accountManager.getService(account);
+            final isLocal = account.type == CloudType.local;
+
             return InkWell(
               onTap: () => _openBrowser(context, account, service),
               child: Container(
@@ -1713,30 +1780,51 @@ class _HomeScreenState extends State<HomeScreen> {
                       flex: 3,
                       child: Text(
                         _getTypeDisplayName(account.type),
-                        style: const TextStyle(fontSize: 11, color: Colors.white60),
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: isLocal ? Colors.tealAccent.shade100 : Colors.white60,
+                        ),
                         overflow: TextOverflow.ellipsis,
                       ),
                     ),
                     Expanded(
                       flex: 3,
                       child: Row(
-                        children: const [
-                          Icon(Icons.check_circle, size: 12, color: Colors.greenAccent),
-                          SizedBox(width: 4),
-                          Text('연결됨', style: TextStyle(fontSize: 11, color: Colors.greenAccent)),
+                        children: [
+                          Icon(
+                            Icons.check_circle,
+                            size: 12,
+                            color: isLocal ? Colors.tealAccent : Colors.greenAccent,
+                          ),
+                          const SizedBox(width: 4),
+                          Text(
+                            isLocal ? '로컬 저장소' : '연결됨',
+                            style: TextStyle(
+                              fontSize: 11,
+                              color: isLocal ? Colors.tealAccent : Colors.greenAccent,
+                            ),
+                          ),
                         ],
                       ),
                     ),
                     SizedBox(
                       width: 50,
                       child: Center(
-                        child: IconButton(
-                          icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
-                          tooltip: '계정 삭제',
-                          padding: EdgeInsets.zero,
-                          constraints: const BoxConstraints(),
-                          onPressed: () => _confirmDelete(context, account, accountManager),
-                        ),
+                        child: isLocal
+                            ? IconButton(
+                                icon: const Icon(Icons.file_open_outlined, size: 16, color: Colors.tealAccent),
+                                tooltip: '파일 열기',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                onPressed: () => _pickAndPlayLocalFile(context, accountManager),
+                              )
+                            : IconButton(
+                                icon: const Icon(Icons.delete_outline, size: 16, color: Colors.redAccent),
+                                tooltip: '계정 삭제',
+                                padding: EdgeInsets.zero,
+                                constraints: const BoxConstraints(),
+                                onPressed: () => _confirmDelete(context, account, accountManager),
+                              ),
                       ),
                     ),
                   ],
@@ -1756,6 +1844,10 @@ class _HomeScreenState extends State<HomeScreen> {
     IconData icon;
     Color color;
     switch (type) {
+      case CloudType.local:
+        icon = Icons.laptop_chromebook;
+        color = Colors.tealAccent;
+        break;
       case CloudType.googleDrive:
         icon = Icons.add_to_drive;
         color = Colors.amber;
@@ -1776,6 +1868,10 @@ class _HomeScreenState extends State<HomeScreen> {
     IconData icon;
     Color color;
     switch (type) {
+      case CloudType.local:
+        icon = Icons.computer_rounded;
+        color = Colors.tealAccent;
+        break;
       case CloudType.googleDrive:
         icon = Icons.add_to_drive;
         color = Colors.amber.shade700;
@@ -1804,6 +1900,10 @@ class _HomeScreenState extends State<HomeScreen> {
     Color color;
 
     switch (type) {
+      case CloudType.local:
+        icon = Icons.computer_rounded;
+        color = Colors.tealAccent;
+        break;
       case CloudType.googleDrive:
         icon = Icons.add_to_drive;
         color = Colors.amber.shade700;
@@ -1830,6 +1930,8 @@ class _HomeScreenState extends State<HomeScreen> {
 
   String _getTypeDisplayName(CloudType type) {
     switch (type) {
+      case CloudType.local:
+        return '로컬 디스크 / 내 기기';
       case CloudType.googleDrive:
         return 'Google Drive';
       case CloudType.oneDrive:
@@ -1840,10 +1942,7 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _playHistoryItem(BuildContext context, PlaybackRecord record, AccountManager accountManager) {
-    final account = accountManager.accounts.cast<CloudAccount?>().firstWhere(
-      (a) => a?.id == record.accountId,
-      orElse: () => null,
-    );
+    final account = accountManager.getAccountById(record.accountId);
 
     if (account != null) {
       final service = accountManager.getService(account);
@@ -1917,10 +2016,7 @@ class _HomeScreenState extends State<HomeScreen> {
     AccountManager accountManager,
     FolderShortcutManager shortcutManager,
   ) {
-    final account = accountManager.accounts.cast<CloudAccount?>().firstWhere(
-      (a) => a?.id == shortcut.accountId,
-      orElse: () => null,
-    );
+    final account = accountManager.getAccountById(shortcut.accountId);
 
     if (account != null) {
       final service = accountManager.getService(account);
@@ -2009,6 +2105,155 @@ class _HomeScreenState extends State<HomeScreen> {
             child: const Text('삭제', style: TextStyle(color: Colors.white)),
           ),
         ],
+      ),
+    );
+  }
+
+  Future<void> _pickAndPlayLocalFile(BuildContext context, AccountManager accountManager) async {
+    try {
+      if (Platform.isAndroid) {
+        await PermissionUtils.ensureStoragePermission();
+      }
+
+      final files = await FilePicker.pickFiles(
+        type: FileType.custom,
+        allowedExtensions: [
+          'mp4', 'mkv', 'avi', 'mov', 'wmv', 'flv', 'webm', 'ts', '3gp', 'm4v', 'asf'
+        ],
+        dialogTitle: '재생할 동영상 파일 선택',
+      );
+
+      if (!mounted) return;
+
+      if (files.isNotEmpty && files.first.path != null) {
+        final path = files.first.path!;
+        final file = File(path);
+        final fileName = files.first.name;
+        int? size;
+        try {
+          size = file.lengthSync();
+        } catch (_) {}
+        final parentDir = file.parent.path;
+
+        final localItem = MediaItem(
+          id: path,
+          name: fileName,
+          isFolder: false,
+          size: size,
+          parentId: parentDir,
+          directStreamUrl: path,
+        );
+
+        final service = accountManager.getService(AccountManager.localAccount);
+        Navigator.push(
+          this.context,
+          MaterialPageRoute(
+            builder: (_) => PlayerScreen(
+              item: localItem,
+              service: service,
+            ),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(this.context).showSnackBar(
+          SnackBar(content: Text('파일 선택 중 오류 발생: $e')),
+        );
+      }
+    }
+  }
+
+  void _showQuickActionSheet(BuildContext context, AccountManager accountManager) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E2430),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (ctx) => SafeArea(
+        child: Padding(
+          padding: const EdgeInsets.symmetric(vertical: 20, horizontal: 16),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Padding(
+                padding: EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                child: Text(
+                  '미디어 열기 및 소스 추가',
+                  style: TextStyle(fontSize: 17, fontWeight: FontWeight.bold, color: Colors.white),
+                ),
+              ),
+              const SizedBox(height: 12),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.tealAccent.withAlpha(25),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.file_open_outlined, color: Colors.tealAccent),
+                ),
+                title: const Text('로컬 파일 직접 열기', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('내 PC/기기의 동영상 파일을 바로 선택하여 재생합니다.'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _pickAndPlayLocalFile(context, accountManager);
+                },
+              ),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.teal.withAlpha(25),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.computer_rounded, color: Colors.tealAccent),
+                ),
+                title: const Text('내 PC 폴더 탐색', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('로컬 디스크(C:, D:) 및 다운로드/동영상 폴더를 탐색합니다.'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  final service = accountManager.getService(AccountManager.localAccount);
+                  _openBrowser(context, AccountManager.localAccount, service);
+                },
+              ),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.blueAccent.withAlpha(25),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.cloud_upload_outlined, color: Colors.blueAccent),
+                ),
+                title: const Text('클라우드 드라이브 연결', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('Google Drive, OneDrive, WebDAV 계정을 추가합니다.'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _openAddAccountDialog(context);
+                },
+              ),
+              ListTile(
+                leading: Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withAlpha(25),
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: const Icon(Icons.bookmark_add_outlined, color: Colors.amber),
+                ),
+                title: const Text('폴더 바로가기 추가', style: TextStyle(fontWeight: FontWeight.bold)),
+                subtitle: const Text('자주 보는 폴더를 홈 화면에 바로가기로 고정합니다.'),
+                onTap: () {
+                  Navigator.pop(ctx);
+                  _openAddFolderShortcutDialog(context);
+                },
+              ),
+            ],
+          ),
+        ),
       ),
     );
   }

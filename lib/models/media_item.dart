@@ -36,8 +36,20 @@ class MediaItem {
       '.webm',
       '.m4v',
       '.ts',
+      '.tp',
+      '.m2ts',
+      '.mts',
       '.3gp',
-      '.asf'
+      '.asf',
+      '.vob',
+      '.mpg',
+      '.mpeg',
+      '.m2v',
+      '.ogv',
+      '.divx',
+      '.rm',
+      '.rmvb',
+      '.f4v',
     ];
     if (videoExtensions.any((ext) => lowerName.endsWith(ext))) return true;
     if (mimeType != null && mimeType!.startsWith('video/')) return true;

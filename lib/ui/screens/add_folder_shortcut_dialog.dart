@@ -31,11 +31,10 @@ class _AddFolderShortcutDialogState extends State<AddFolderShortcutDialog> {
   void initState() {
     super.initState();
     final accountManager = context.read<AccountManager>();
-    if (accountManager.accounts.isNotEmpty) {
-      _selectedAccount = accountManager.accounts.first;
-      _service = accountManager.getService(_selectedAccount!);
-      _loadFolders();
-    }
+    final allAccounts = [AccountManager.localAccount, ...accountManager.accounts];
+    _selectedAccount = allAccounts.first;
+    _service = accountManager.getService(_selectedAccount!);
+    _loadFolders();
   }
 
   void _onAccountChanged(CloudAccount? account) {
@@ -186,12 +185,12 @@ class _AddFolderShortcutDialogState extends State<AddFolderShortcutDialog> {
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
                         Text(
-                          '클라우드 폴더 바로가기 추가',
+                          '폴더 바로가기 추가',
                           style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
                         ),
                         SizedBox(height: 2),
                         Text(
-                          '첫 화면에서 빠르게 접근할 폴더를 지정합니다',
+                          '첫 화면에서 빠르게 접근할 폴더(로컬 / 클라우드)를 지정합니다',
                           style: TextStyle(fontSize: 12, color: Colors.white54),
                         ),
                       ],
@@ -205,34 +204,62 @@ class _AddFolderShortcutDialogState extends State<AddFolderShortcutDialog> {
               ),
               const SizedBox(height: 16),
 
-              // 계정 선택 드롭다운 (계정이 2개 이상일 때)
-              if (accounts.length > 1) ...[
-                const Text('클라우드 계정', style: TextStyle(fontSize: 13, color: Colors.white70)),
-                const SizedBox(height: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 14),
-                  decoration: BoxDecoration(
-                    color: Colors.black26,
-                    borderRadius: BorderRadius.circular(10),
-                    border: Border.all(color: Colors.white12),
-                  ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<CloudAccount>(
-                      value: _selectedAccount,
-                      isExpanded: true,
-                      dropdownColor: const Color(0xFF222834),
-                      items: accounts.map((acc) {
-                        return DropdownMenuItem(
-                          value: acc,
-                          child: Text('${acc.name} (${acc.type.name})'),
-                        );
-                      }).toList(),
-                      onChanged: _onAccountChanged,
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 14),
-              ],
+              // 저장소 계정 선택 드롭다운 (저장소가 2개 이상일 때)
+              Builder(
+                builder: (context) {
+                  final allAccounts = [AccountManager.localAccount, ...accounts];
+                  if (allAccounts.length <= 1) return const SizedBox.shrink();
+
+                  return Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      const Text('저장소 선택', style: TextStyle(fontSize: 13, color: Colors.white70)),
+                      const SizedBox(height: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 14),
+                        decoration: BoxDecoration(
+                          color: Colors.black26,
+                          borderRadius: BorderRadius.circular(10),
+                          border: Border.all(color: Colors.white12),
+                        ),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<CloudAccount>(
+                            value: _selectedAccount,
+                            isExpanded: true,
+                            dropdownColor: const Color(0xFF222834),
+                            items: allAccounts.map((acc) {
+                              return DropdownMenuItem(
+                                value: acc,
+                                child: Row(
+                                  children: [
+                                    Icon(
+                                      acc.type == CloudType.local
+                                          ? Icons.computer_rounded
+                                          : Icons.cloud_queue,
+                                      size: 16,
+                                      color: acc.type == CloudType.local
+                                          ? Colors.tealAccent
+                                          : Colors.blueAccent,
+                                    ),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      acc.type == CloudType.local
+                                          ? '내 PC (로컬 저장소)'
+                                          : '${acc.name} (${acc.type.name})',
+                                    ),
+                                  ],
+                                ),
+                              );
+                            }).toList(),
+                            onChanged: _onAccountChanged,
+                          ),
+                        ),
+                      ),
+                      const SizedBox(height: 14),
+                    ],
+                  );
+                },
+              ),
 
               // 현재 위치 탐색 바 (Breadcrumb)
               Container(

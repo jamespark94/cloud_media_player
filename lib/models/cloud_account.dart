@@ -4,6 +4,7 @@ enum CloudType {
   googleDrive,
   oneDrive,
   webDav,
+  local,
 }
 
 class CloudAccount {

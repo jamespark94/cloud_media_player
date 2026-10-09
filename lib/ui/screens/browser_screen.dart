@@ -2,12 +2,16 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:file_picker/file_picker.dart';
+import 'package:permission_handler/permission_handler.dart';
 import '../../models/cloud_account.dart';
 import '../../models/folder_shortcut.dart';
 import '../../models/media_item.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/folder_shortcut_manager.dart';
+import '../../services/local_disk_service.dart';
 import '../../services/playback_history_service.dart';
+import '../../utils/permission_utils.dart';
 import 'player_screen.dart';
 
 enum BrowserViewMode {
@@ -64,7 +68,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     super.initState();
     _loadViewMode();
     _folderStack = [
-      const MapEntry(null, '홈'),
+      MapEntry(null, widget.account.type == CloudType.local ? '내 PC' : '홈'),
       if (widget.initialFolderId != null)
         MapEntry(widget.initialFolderId, widget.initialFolderName ?? '폴더'),
     ];
@@ -147,10 +151,51 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   void _navigateToFolder(MediaItem folder) {
+    if (folder.id == '__ACTION_ADD_STORAGE__') {
+      _pickAndAddCustomStorage();
+      return;
+    }
     _folderStack.add(MapEntry(folder.id, folder.name));
     _searchController.clear();
     _searchQuery = '';
     _loadFolder();
+  }
+
+  Future<void> _pickAndAddCustomStorage() async {
+    if (Platform.isAndroid) {
+      final hasPerm = await PermissionUtils.hasManageStoragePermission();
+      if (!hasPerm && mounted) {
+        final goSettings = await PermissionUtils.showPermissionGuideDialog(
+          context,
+          customMessage: 'SD 카드 또는 사용자 지정 폴더에 원활하게 접근하려면 \'모든 파일에 대한 관리\' 권한이 필요합니다.\n\n설정 화면으로 이동하여 권한을 허용하시겠습니까?',
+        );
+        if (goSettings) return;
+      }
+    }
+
+    try {
+      final selectedPath = await FilePicker.getDirectoryPath(
+        dialogTitle: '추가할 SD 카드 또는 로컬 폴더 선택',
+      );
+      if (selectedPath != null && selectedPath.isNotEmpty && mounted) {
+        await LocalDiskService.addCustomStoragePath(selectedPath);
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(
+              content: Text('새 저장소(\'$selectedPath\')가 등록되었습니다.'),
+              duration: const Duration(seconds: 2),
+            ),
+          );
+          _loadFolder();
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('폴더 선택 중 오류 발생: $e')),
+        );
+      }
+    }
   }
 
   bool _navigateBack() {
@@ -332,9 +377,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   );
                 },
               ),
+            if (widget.account.type == CloudType.local)
+              IconButton(
+                icon: const Icon(Icons.create_new_folder_outlined),
+                tooltip: '저장소 / SD 카드 직접 추가',
+                onPressed: _pickAndAddCustomStorage,
+              ),
             IconButton(
               icon: const Icon(Icons.refresh),
-              tooltip: '새로고침',
+              tooltip: '새로고침 / 저장소 다시 감지',
               onPressed: _loadFolder,
             ),
           ],
@@ -362,20 +413,45 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
 
     if (_errorMessage != null) {
+      final isPermission = _errorMessage!.contains('권한') || _errorMessage!.toLowerCase().contains('permission');
       return Center(
         child: Padding(
           padding: const EdgeInsets.all(24.0),
           child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
-              const Icon(Icons.error_outline, color: Colors.redAccent, size: 48),
+              Icon(
+                isPermission ? Icons.security_outlined : Icons.error_outline,
+                color: isPermission ? Colors.amber : Colors.redAccent,
+                size: 56,
+              ),
               const SizedBox(height: 16),
-              Text(_errorMessage!, textAlign: TextAlign.center),
-              const SizedBox(height: 16),
-              ElevatedButton.icon(
-                onPressed: _loadFolder,
-                icon: const Icon(Icons.refresh),
-                label: const Text('다시 시도'),
+              Text(
+                _errorMessage!,
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 14, height: 1.5),
+              ),
+              const SizedBox(height: 20),
+              Wrap(
+                spacing: 12,
+                runSpacing: 8,
+                alignment: WrapAlignment.center,
+                children: [
+                  if (isPermission && Platform.isAndroid)
+                    ElevatedButton.icon(
+                      onPressed: () async {
+                        await openAppSettings();
+                      },
+                      style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+                      icon: const Icon(Icons.settings, color: Colors.white, size: 18),
+                      label: const Text('설정에서 권한 허용', style: TextStyle(color: Colors.white)),
+                    ),
+                  OutlinedButton.icon(
+                    onPressed: _loadFolder,
+                    icon: const Icon(Icons.refresh, size: 18),
+                    label: const Text('다시 시도'),
+                  ),
+                ],
               ),
             ],
           ),
@@ -384,14 +460,54 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
 
     if (_filteredItems.isEmpty) {
+      final isLocal = widget.account.type == CloudType.local;
       return Center(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Icon(Icons.folder_open, size: 64, color: Colors.grey.withAlpha(128)),
-            const SizedBox(height: 16),
-            const Text('비디오 파일이나 폴더가 없습니다.', style: TextStyle(color: Colors.grey)),
-          ],
+        child: Padding(
+          padding: const EdgeInsets.all(24.0),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.folder_open, size: 64, color: Colors.grey.withAlpha(128)),
+              const SizedBox(height: 16),
+              const Text('비디오 파일이나 폴더가 없습니다.', style: TextStyle(color: Colors.grey, fontSize: 15)),
+              if (isLocal && Platform.isAndroid) ...[
+                const SizedBox(height: 12),
+                const Text(
+                  '💡 실제 동영상이 있는데도 비어있다고 나온다면\nAndroid 미디어/저장소 접근 권한을 확인해 보세요.',
+                  textAlign: TextAlign.center,
+                  style: TextStyle(color: Colors.white54, fontSize: 12, height: 1.4),
+                ),
+                const SizedBox(height: 16),
+                Wrap(
+                  spacing: 10,
+                  alignment: WrapAlignment.center,
+                  children: [
+                    ElevatedButton.icon(
+                      onPressed: () async {
+                        final granted = await PermissionUtils.ensureStoragePermission();
+                        if (!granted && mounted) {
+                          await openAppSettings();
+                        }
+                        if (mounted) _loadFolder();
+                      },
+                      icon: const Icon(Icons.security, size: 16),
+                      label: const Text('저장소 권한 허용/확인'),
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: Colors.blueAccent,
+                        foregroundColor: Colors.white,
+                        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+                      ),
+                    ),
+                    OutlinedButton.icon(
+                      onPressed: _pickAndAddCustomStorage,
+                      icon: const Icon(Icons.create_new_folder_outlined, size: 16),
+                      label: const Text('SD카드/폴더 직접 지정'),
+                    ),
+                  ],
+                ),
+              ],
+            ],
+          ),
         ),
       );
     }
@@ -1474,6 +1590,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
     IconData icon;
     Color color;
     switch (type) {
+      case CloudType.local:
+        icon = Icons.laptop_chromebook;
+        color = Colors.tealAccent;
+        break;
       case CloudType.googleDrive:
         icon = Icons.add_to_drive;
         color = Colors.amber;

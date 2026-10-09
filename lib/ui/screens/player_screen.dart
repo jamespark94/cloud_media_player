@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
+import 'package:audio_session/audio_session.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -47,6 +48,15 @@ class _PlayerScreenState extends State<PlayerScreen> {
   Timer? _positionSaveTimer;
   bool _hasAutoSelectedSubtitle = false;
   bool _hasResumed = false;
+
+  // 오디오 포커스 세션 관리 (유튜브 등 타 앱 오디오 제어)
+  AudioSession? _audioSession;
+  StreamSubscription? _interruptionSub;
+  StreamSubscription? _becomingNoisySub;
+  StreamSubscription? _playingSub;
+
+  // 하드웨어 가속 상태 관리
+  bool _isHwDec = true;
 
   // 이전 시청 시 사용한 자막 파일 및 언어 설정 기억 변수
   String? _currentSubtitleType;
@@ -160,6 +170,20 @@ class _PlayerScreenState extends State<PlayerScreen> {
       _saveCurrentPosition();
     });
 
+    // 재생 상태 감지: 재생 시 Audio Focus 획득 (유튜브 등 타 앱 자동 일시정지), 일시정지 시 포커스 해제
+    _playingSub = _player.stream.playing.listen((playing) async {
+      if (playing) {
+        try {
+          await _audioSession?.setActive(true);
+        } catch (_) {}
+      } else {
+        try {
+          await _audioSession?.setActive(false);
+        } catch (_) {}
+      }
+    });
+
+    _initAudioSession();
     _initAndPlay();
   }
 
@@ -919,8 +943,128 @@ class _PlayerScreenState extends State<PlayerScreen> {
     );
   }
 
+  /// Android / iOS 오디오 세션 초기화 및 인터럽션(전화, 유튜브 등) 처리
+  Future<void> _initAudioSession() async {
+    try {
+      final session = await AudioSession.instance;
+      await session.configure(const AudioSessionConfiguration.music());
+      _audioSession = session;
+
+      // 오디오 포커스 중단 이벤트 리스너 (전화 수신, 다른 미디어 재생 시작 등)
+      _interruptionSub = session.interruptionEventStream.listen((event) {
+        if (event.begin) {
+          switch (event.type) {
+            case AudioInterruptionType.duck:
+            case AudioInterruptionType.pause:
+            case AudioInterruptionType.unknown:
+              if (_player.state.playing) {
+                _player.pause();
+              }
+              break;
+          }
+        } else {
+          if (event.type == AudioInterruptionType.pause) {
+            _player.play();
+          }
+        }
+      });
+
+      // 이어폰 또는 블루투스 오디오 장치 분리 시 즉시 일시정지 (사용자 프라이버시 보호)
+      _becomingNoisySub = session.becomingNoisyEventStream.listen((_) {
+        if (_player.state.playing) {
+          _player.pause();
+          _showNotificationBanner(
+            message: '오디오 장치 연결 해제로 일시정지됨',
+            icon: Icons.headset_off,
+            iconColor: Colors.amber,
+            duration: const Duration(seconds: 3),
+          );
+        }
+      });
+    } catch (_) {}
+  }
+
+  /// 하드웨어 가속 [HW] ↔ 소프트웨어 디코딩 [SW] 실시간 원터치 전환
+  Future<void> _toggleHardwareAcceleration() async {
+    final nextHw = !_isHwDec;
+    final hwValue = nextHw ? (Platform.isAndroid ? 'mediacodec' : 'auto') : 'no';
+    try {
+      final platform = (_player.platform as dynamic);
+      await platform?.setProperty('hwdec', hwValue);
+      setState(() {
+        _isHwDec = nextHw;
+      });
+      _showNotificationBanner(
+        message: nextHw
+            ? '하드웨어 가속 활성화됨 (GPU / MediaCodec)'
+            : '소프트웨어 디코딩 모드로 전환됨 (CPU)',
+        icon: nextHw ? Icons.speed : Icons.memory,
+        iconColor: nextHw ? Colors.tealAccent : Colors.orangeAccent,
+        duration: const Duration(seconds: 3),
+      );
+    } catch (e) {
+      _showNotificationBanner(
+        message: '가속 모드 전환 실패: $e',
+        icon: Icons.error_outline,
+        iconColor: Colors.redAccent,
+        duration: const Duration(seconds: 2),
+      );
+    }
+  }
+
+  /// 플레이어 상단바에 표시할 세련된 [HW] / [SW] 뱃지 위젯
+  Widget _buildHwSwBadge() {
+    final isHw = _isHwDec;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        borderRadius: BorderRadius.circular(4),
+        onTap: _toggleHardwareAcceleration,
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+          decoration: BoxDecoration(
+            color: isHw
+                ? Colors.teal.withValues(alpha: 0.25)
+                : Colors.orange.withValues(alpha: 0.25),
+            borderRadius: BorderRadius.circular(4),
+            border: Border.all(
+              color: isHw ? Colors.tealAccent : Colors.orangeAccent,
+              width: 1,
+            ),
+          ),
+          child: Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(
+                isHw ? Icons.flash_on : Icons.memory,
+                size: 13,
+                color: isHw ? Colors.tealAccent : Colors.orangeAccent,
+              ),
+              const SizedBox(width: 3),
+              Text(
+                isHw ? 'HW' : 'SW',
+                style: TextStyle(
+                  color: isHw ? Colors.tealAccent : Colors.orangeAccent,
+                  fontSize: 11,
+                  fontWeight: FontWeight.bold,
+                  letterSpacing: 0.5,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
   @override
   void dispose() {
+    _interruptionSub?.cancel();
+    _becomingNoisySub?.cancel();
+    _playingSub?.cancel();
+    try {
+      _audioSession?.setActive(false);
+    } catch (_) {}
     _bannerDismissTimer?.cancel();
     _positionSaveTimer?.cancel();
     _completedSub?.cancel();
@@ -1220,15 +1364,23 @@ class _PlayerScreenState extends State<PlayerScreen> {
               crossAxisAlignment: CrossAxisAlignment.start,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(
-                  widget.item.name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: const TextStyle(
-                    color: Colors.white,
-                    fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                  ),
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(
+                        widget.item.name,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 16,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    _buildHwSwBadge(),
+                  ],
                 ),
                 Text(
                   '${widget.service.account.name} • ${widget.item.formattedSize}',
