@@ -144,7 +144,7 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         : GoogleDriveService.defaultClientId;
     final clientSecret = _clientSecretController.text.trim().isNotEmpty
         ? _clientSecretController.text.trim()
-        : null;
+        : GoogleDriveService.defaultClientSecret;
 
     final codeVerifier = OAuthHelper.generateRandomString();
     final codeChallenge = OAuthHelper.generateCodeChallenge(codeVerifier);

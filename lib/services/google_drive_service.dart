@@ -8,13 +8,18 @@ class GoogleDriveService extends CloudService {
   GoogleDriveService(super.account, {super.onAccountUpdated});
 
   static const String defaultClientId =
-      '849319808940-5m9i1p7om6o62e3tgh8c8r6r0k9g7mgh.apps.googleusercontent.com'; // Standard public fallback
+      '952086025939-8rgvb7og9u671j4h14pu5kp52db72hve.apps.googleusercontent.com';
+  static const String defaultClientSecret = '';
   static const String authEndpoint = 'https://accounts.google.com/o/oauth2/v2/auth';
   static const String tokenEndpoint = 'https://oauth2.googleapis.com/token';
 
   String get activeClientId => account.customClientId?.isNotEmpty == true
       ? account.customClientId!
       : defaultClientId;
+
+  String? get activeClientSecret => account.customClientSecret?.isNotEmpty == true
+      ? account.customClientSecret!
+      : defaultClientSecret;
 
   @override
   Future<bool> refreshTokensIfNeeded() async {
@@ -27,8 +32,8 @@ class GoogleDriveService extends CloudService {
         'refresh_token': account.refreshToken!,
         'grant_type': 'refresh_token',
       };
-      if (account.customClientSecret?.isNotEmpty == true) {
-        body['client_secret'] = account.customClientSecret!;
+      if (activeClientSecret?.isNotEmpty == true) {
+        body['client_secret'] = activeClientSecret!;
       }
 
       final res = await OAuthHelper.postWithRetry(
