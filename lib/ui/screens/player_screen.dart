@@ -1,4 +1,4 @@
-import 'dart:async';
+﻿import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -67,7 +67,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   bool _isHwDec = true;
 
   // 제스처 기반 비디오 콘트라스트(명암비) 및 볼륨 조절 상태
-  double _contrast = 1.0;
+  double _contrast = 0.5; // UI 레벨 0.0~1.0 (0~100, 0.5 = 원본)
   double _gestureVolume = 100.0;
   bool _showContrastIndicator = false;
   bool _showVolumeIndicator = false;
@@ -1265,27 +1265,23 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     );
   }
 
-  /// 비디오 콘트라스트(대비) 초기화 (저장된 값 복원, 기본 1.0 = 100%)
+  /// 비디오 콘트라스트 초기화 (UI 레벨 0.0~1.0 = 0~100, 기본 0.5 = 원본)
   Future<void> _initContrast() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getDouble('player_saved_contrast');
-      if (saved != null) {
-        _contrast = saved.clamp(0.5, 2.0);
-      } else {
-        _contrast = 1.0;
-      }
+      final saved = prefs.getDouble('player_saved_contrast_level');
+      _contrast = (saved ?? 0.5).clamp(0.0, 1.0);
       if (mounted) {
         setState(() {});
       }
     } catch (_) {
-      _contrast = 1.0;
+      _contrast = 0.5;
     }
   }
 
-  /// 제스처에 의한 비디오 콘트라스트 변경 (0.5 ~ 2.0, 1.0 = 표준 100%) 및 저장
+  /// 제스처에 의한 비디오 콘트라스트 레벨 변경 (0.0 ~ 1.0 → UI 0~100) 및 저장
   Future<void> _setContrast(double value) async {
-    final clamped = value.clamp(0.5, 2.0);
+    final clamped = value.clamp(0.0, 1.0);
     setState(() {
       _contrast = clamped;
       _showContrastIndicator = true;
@@ -1293,17 +1289,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     });
     try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble('player_saved_contrast', clamped);
+      await prefs.setDouble('player_saved_contrast_level', clamped);
     } catch (_) {}
     _startGestureDismissTimer();
   }
 
+  /// UI 레벨(0~1)을 실제 게인으로 변환: 0→0.2, 0.5→1.0(원본), 1.0→2.0
+  double _contrastGain(double level) {
+    return level <= 0.5 ? 0.2 + level * 1.6 : 1.0 + (level - 0.5) * 2.0;
+  }
+
   /// 4x5 색상 매트릭스 계산 (블랙 레벨 0 고정 명암비 조절)
-  /// - 오프셋을 0으로 완벽 고정하여 수치를 올리든 내리든 순수 블랙(0)이 절대 들뜨거나 뭉개지지 않음
-  /// - 올리면(>1.0) 음수 오프셋으로 인한 어두워짐 없이 명암비와 하이라이트가 시원하게 살아남
-  /// - 내리면(<1.0) 양수 오프셋으로 인한 블랙 들뜸 없이 눈부심이 편안하고 차분해짐
-  List<double> _getContrastMatrix(double contrast) {
-    final c = contrast;
+  /// - 오프셋을 0으로 고정하여 블랙(0)이 들뜨거나 뭉개지지 않음
+  List<double> _getContrastMatrix(double level) {
+    final c = _contrastGain(level);
     return <double>[
       c, 0, 0, 0, 0,
       0, c, 0, 0, 0,
@@ -1490,8 +1489,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 final delta = -details.primaryDelta! / (size.height * 0.75);
 
                 if (_isDraggingLeft) {
-                  // 화면 왼쪽: 비디오 콘트라스트(명암비) 조절 (0.5 ~ 2.0, 기본 1.0)
-                  final newC = (_contrast + delta).clamp(0.5, 2.0);
+                  // 화면 왼쪽: 비디오 콘트라스트(명암비) 조절 (UI 0~100, 기본 50)
+                  final newC = (_contrast + delta).clamp(0.0, 1.0);
                   _setContrast(newC);
                 } else if (_isDraggingRight) {
                   // 화면 오른쪽: 시스템 볼륨 조절 (0.0 ~ 100.0)
@@ -1514,7 +1513,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 children: [
                   // 1. 비디오 화면 렌더링 (콘트라스트 실시간 ColorFilter 적용)
                   Center(
-                    child: _contrast == 1.0
+                    child: _contrast == 0.5
                         ? Video(
                             controller: _controller,
                             controls: NoVideoControls,
@@ -1660,8 +1659,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                   child: _buildVerticalIndicator(
                     icon: Icons.contrast,
                     iconColor: Colors.amberAccent,
-                    percent: (_contrast / 2.0).clamp(0.0, 1.0),
-                    label: '${(_contrast * 100).round()}%',
+                    percent: _contrast.clamp(0.0, 1.0),
+                    label: '${(_contrast * 100).round()}',
                   ),
                 ),
               ),
