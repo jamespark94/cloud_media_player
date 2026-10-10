@@ -35,4 +35,19 @@ abstract class CloudService {
     }
     throw Exception('파일 다운로드 실패 (${res.statusCode}): ${res.body}');
   }
+
+  /// 파일 또는 폴더의 이름을 변경합니다.
+  Future<bool> renameItem(MediaItem item, String newName) async => false;
+
+  /// 파일 또는 폴더를 삭제합니다.
+  Future<bool> deleteItem(MediaItem item) async => false;
+
+  /// 파일 또는 폴더를 대상 폴더로 이동합니다.
+  Future<bool> moveItem(MediaItem item, String targetFolderId) async => false;
+
+  /// 파일 또는 폴더를 대상 폴더로 복사합니다.
+  Future<bool> copyItem(MediaItem item, String targetFolderId) async => false;
+
+  /// 현재 또는 지정한 폴더 내에 새 폴더를 생성합니다.
+  Future<bool> createFolder(String folderName, {String? parentFolderId}) async => false;
 }

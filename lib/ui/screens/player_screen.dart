@@ -80,6 +80,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   String? _currentSubtitleId;
   String? _currentSubtitleName;
   String? _currentSubtitleLanguage;
+  bool _isApplyingSubtitle = false;
+  Duration? _pendingSeekAfterSubtitle;
 
   // 비디오 썸네일 캡처 상태
   bool _hasCapturedThumbnail = false;
@@ -569,6 +571,122 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
   }
 
+  /// 구형 기기 및 자막 로딩 중 Seek 충돌을 방지하는 안전한 Seek 래퍼
+  Future<void> _safeSeek(Duration target) async {
+    final clampedTarget = target < Duration.zero
+        ? Duration.zero
+        : (_totalDuration > Duration.zero && target > _totalDuration ? _totalDuration : target);
+
+    if (_isApplyingSubtitle) {
+      // 자막 디먹서 재정렬 및 파싱 중일 때는 Seek 명령을 보류하여 락/드롭 방지
+      _pendingSeekAfterSubtitle = clampedTarget;
+      debugPrint('[PlayerScreen] 자막 처리 중 Seek 보류 -> $clampedTarget');
+      if (mounted) {
+        setState(() => _dragPosition = clampedTarget);
+      }
+      return;
+    }
+
+    try {
+      await _player.seek(clampedTarget);
+    } catch (e) {
+      debugPrint('[PlayerScreen] Seek 실패: $e');
+    }
+  }
+
+  void _flushPendingSeek() {
+    if (_pendingSeekAfterSubtitle != null) {
+      final pending = _pendingSeekAfterSubtitle!;
+      _pendingSeekAfterSubtitle = null;
+      if (mounted) {
+        setState(() => _dragPosition = null);
+      }
+      debugPrint('[PlayerScreen] 자막 파이프라인 안정화 -> 보류된 Seek 즉각 실행 ($pending)');
+      try {
+        _player.seek(pending);
+      } catch (_) {}
+    }
+  }
+
+  /// 자막 창 닫힌 직후 백그라운드로 안전하게 자막을 다운로드 및 적용
+  Future<void> _applySelectedSubtitleAsync({
+    required String type,
+    String? id,
+    String? name,
+    String? language,
+  }) async {
+    _isApplyingSubtitle = true;
+    _currentSubtitleType = type;
+    _currentSubtitleId = id;
+    _currentSubtitleName = name;
+    _currentSubtitleLanguage = language ?? 'ko';
+    _saveCurrentPosition();
+
+    if (type == 'none') {
+      try {
+        await _player.setSubtitleTrack(SubtitleTrack.no());
+      } catch (_) {}
+      _isApplyingSubtitle = false;
+      _flushPendingSeek();
+      return;
+    }
+
+    if (mounted && name != null) {
+      _showNotificationBanner(
+        message: '자막 적용 중: $name',
+        icon: Icons.subtitles,
+        iconColor: Colors.amber,
+        duration: const Duration(seconds: 2),
+      );
+    }
+
+    try {
+      if (type == 'local' && id != null) {
+        final localFile = File(id);
+        if (localFile.existsSync()) {
+          await _player.setSubtitleTrack(
+            SubtitleTrack.uri(localFile.path, title: name ?? 'local', language: language ?? 'ko'),
+          );
+        }
+      } else if (type == 'cloud' && id != null) {
+        final tempDir = Directory.systemTemp;
+        final cached = File('${tempDir.path}/${id}_${name ?? ""}');
+        if (!cached.existsSync() || cached.lengthSync() == 0) {
+          final subItem = MediaItem(id: id, name: name ?? 'subtitle', isFolder: false);
+          final url = await widget.service.getStreamUrl(subItem);
+          final headers = await widget.service.getStreamHeaders();
+          final res = await http.get(Uri.parse(url), headers: headers);
+          if (res.statusCode == 200) {
+            await cached.writeAsBytes(res.bodyBytes);
+          }
+        }
+        if (cached.existsSync() && cached.lengthSync() > 0) {
+          await _player.setSubtitleTrack(
+            SubtitleTrack.uri(cached.path, title: name, language: language ?? 'ko'),
+          );
+        }
+      } else if (type == 'track' && id != null) {
+        _restoreTrackSubtitle(_player.state.tracks.subtitle);
+      }
+
+      if (mounted && name != null) {
+        _showNotificationBanner(
+          message: '자막 적용 완료: $name',
+          icon: Icons.subtitles,
+          iconColor: Colors.tealAccent,
+          duration: const Duration(seconds: 2),
+        );
+      }
+    } catch (e) {
+      debugPrint('[PlayerScreen] 자막 적용 오류: $e');
+    } finally {
+      // mpv 디먹서 파이프라인이 안정화될 수 있도록 약간의 딜레이(200ms) 후 대기 중인 Seek 실행
+      await Future.delayed(const Duration(milliseconds: 200));
+      _isApplyingSubtitle = false;
+      _flushPendingSeek();
+    }
+  }
+
   void _openSubtitleDialog({int initialTab = 0}) {
     _hideControlsTimer?.cancel();
     showDialog(
@@ -579,11 +697,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         service: widget.service,
         initialTabIndex: initialTab,
         onSubtitleChanged: (type, id, name, language) {
-          _currentSubtitleType = type;
-          _currentSubtitleId = id;
-          _currentSubtitleName = name;
-          _currentSubtitleLanguage = language;
-          _saveCurrentPosition();
+          _applySelectedSubtitleAsync(
+            type: type,
+            id: id,
+            name: name,
+            language: language,
+          );
         },
       ),
     ).then((_) {
@@ -1305,11 +1424,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           },
           const SingleActivator(LogicalKeyboardKey.arrowRight): () {
             final target = _player.state.position + const Duration(seconds: 10);
-            _player.seek(target);
+            _safeSeek(target);
           },
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
             final target = _player.state.position - const Duration(seconds: 10);
-            _player.seek(target < Duration.zero ? Duration.zero : target);
+            _safeSeek(target < Duration.zero ? Duration.zero : target);
           },
         },
         child: Focus(
@@ -1880,7 +1999,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                                   setState(() {
                                     _dragPosition = null;
                                   });
-                                  _player.seek(target);
+                                  _safeSeek(target);
                                   _startHideTimer();
                                 }
                               : null,
@@ -1955,7 +2074,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                     tooltip: '10초 뒤로',
                     onPressed: () {
                       final target = _player.state.position - const Duration(seconds: 10);
-                      _player.seek(target < Duration.zero ? Duration.zero : target);
+                      _safeSeek(target < Duration.zero ? Duration.zero : target);
                       _startHideTimer();
                     },
                   ),
@@ -1964,7 +2083,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                     tooltip: '10초 앞으로',
                     onPressed: () {
                       final target = _player.state.position + const Duration(seconds: 10);
-                      _player.seek(target);
+                      _safeSeek(target);
                       _startHideTimer();
                     },
                   ),

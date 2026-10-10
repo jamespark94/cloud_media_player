@@ -54,6 +54,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
   List<MediaItem> _allItems = [];
   List<MediaItem> _filteredItems = [];
   
+  // File operations clipboard state
+  MediaItem? _clipboardItem;
+  bool _isCutMode = false;
+  
   // Navigation stack (folderId, folderName)
   late final List<MapEntry<String?, String>> _folderStack;
   String _searchQuery = '';
@@ -322,11 +326,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
               }).toList(),
             ),
             const SizedBox(width: 4),
-            // 첫 화면(홈) 바로가기 버튼
+            // 새 폴더 생성 버튼
             IconButton(
-              icon: const Icon(Icons.home_outlined),
-              tooltip: '첫 화면(홈)으로 이동',
-              onPressed: () => Navigator.pop(context),
+              icon: const Icon(Icons.create_new_folder_outlined),
+              tooltip: '새 폴더 생성',
+              onPressed: _promptCreateFolder,
             ),
             // 클라우드 최상위(홈) 바로가기 버튼
             if (_folderStack.length > 1)
@@ -381,7 +385,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
               ),
             if (widget.account.type == CloudType.local)
               IconButton(
-                icon: const Icon(Icons.create_new_folder_outlined),
+                icon: const Icon(Icons.sd_card_outlined),
                 tooltip: '저장소 / SD 카드 직접 추가',
                 onPressed: _pickAndAddCustomStorage,
               ),
@@ -405,6 +409,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           ),
         ),
         body: _buildBody(),
+        bottomNavigationBar: _clipboardItem != null ? _buildClipboardBar() : null,
       ),
     );
   }
@@ -589,6 +594,483 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
   }
 
+  Future<void> _promptCreateFolder() async {
+    if (widget.account.type == CloudType.local && _folderStack.length <= 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('드라이브 또는 하위 폴더로 진입한 후 새 폴더를 생성할 수 있습니다.')),
+      );
+      return;
+    }
+
+    final textController = TextEditingController();
+    final folderName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E2433),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Row(
+          children: const [
+            Icon(Icons.create_new_folder, color: Colors.amber, size: 22),
+            SizedBox(width: 8),
+            Text('새 폴더 생성', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: TextField(
+          controller: textController,
+          autofocus: true,
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            labelText: '폴더 이름',
+            hintText: '예: 영화, 드라마, 애니',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          onSubmitted: (val) {
+            final trimmed = val.trim();
+            if (trimmed.isNotEmpty) {
+              Navigator.pop(ctx, trimmed);
+            }
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: const Text('취소', style: TextStyle(color: Colors.white60)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+            onPressed: () {
+              final val = textController.text.trim();
+              if (val.isNotEmpty) {
+                Navigator.pop(ctx, val);
+              } else {
+                Navigator.pop(ctx, null);
+              }
+            },
+            child: const Text('생성', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (folderName != null && folderName.isNotEmpty) {
+      setState(() => _isLoading = true);
+      final parentId = _folderStack.last.key;
+      final ok = await widget.service.createFolder(folderName, parentFolderId: parentId);
+      if (mounted) {
+        if (ok) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('\'$folderName\' 폴더가 생성되었습니다.')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('새 폴더 생성에 실패했습니다.')),
+          );
+        }
+        _loadFolder();
+      }
+    }
+  }
+
+  Future<void> _promptRename(MediaItem item) async {
+    final textController = TextEditingController(text: item.name);
+    final newName = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E2433),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Row(
+          children: [
+            Icon(item.isFolder ? Icons.folder : Icons.edit, color: Colors.amber, size: 22),
+            const SizedBox(width: 8),
+            const Text('이름 변경', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: TextField(
+          controller: textController,
+          autofocus: true,
+          style: const TextStyle(fontSize: 14),
+          decoration: InputDecoration(
+            labelText: '새 이름',
+            border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+          ),
+          onSubmitted: (val) {
+            final trimmed = val.trim();
+            if (trimmed.isNotEmpty && trimmed != item.name) {
+              Navigator.pop(ctx, trimmed);
+            }
+          },
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, null),
+            child: const Text('취소', style: TextStyle(color: Colors.white60)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+            onPressed: () {
+              final val = textController.text.trim();
+              if (val.isNotEmpty && val != item.name) {
+                Navigator.pop(ctx, val);
+              } else {
+                Navigator.pop(ctx, null);
+              }
+            },
+            child: const Text('변경', style: TextStyle(color: Colors.white)),
+          ),
+        ],
+      ),
+    );
+
+    if (newName != null && newName.isNotEmpty && newName != item.name) {
+      setState(() => _isLoading = true);
+      final ok = await widget.service.renameItem(item, newName);
+      if (mounted) {
+        if (ok) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('\'$newName\'(으)로 이름이 변경되었습니다.')),
+          );
+        } else {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('이름 변경에 실패했습니다.')),
+          );
+        }
+        _loadFolder();
+      }
+    }
+  }
+
+  Future<void> _confirmDelete(MediaItem item) async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E2433),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Row(
+          children: const [
+            Icon(Icons.delete_forever, color: Colors.redAccent, size: 24),
+            SizedBox(width: 8),
+            Text('삭제 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Text(
+          '\'${item.name}\'${item.isFolder ? ' 폴더와 내부 모든 파일' : ''}을(를) 정말 삭제하시겠습니까?\n\n이 작업은 되돌릴 수 없습니다.',
+          style: const TextStyle(fontSize: 13, height: 1.5),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, false),
+            child: const Text('취소', style: TextStyle(color: Colors.white60)),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
+            onPressed: () => Navigator.pop(ctx, true),
+            child: const Text('삭제', style: TextStyle(color: Colors.white, fontWeight: FontWeight.bold)),
+          ),
+        ],
+      ),
+    );
+
+    if (confirmed == true) {
+      setState(() => _isLoading = true);
+      final ok = await widget.service.deleteItem(item);
+      if (mounted) {
+        if (ok) {
+          if (item.isVideo) {
+            await PlaybackHistoryService.instance.removeRecord(
+              accountId: widget.account.id,
+              itemId: item.id,
+              fileName: item.name,
+            );
+            if (mounted) {
+              final accountMgr = context.read<AccountManager>();
+              CloudPlaybackSyncService.instance.syncPlaybackRecords(accountMgr, silent: true);
+            }
+          } else if (item.isFolder && mounted) {
+            final shortcutMgr = context.read<FolderShortcutManager>();
+            if (shortcutMgr.isFolderShortcut(widget.account.id, item.id)) {
+              await shortcutMgr.removeShortcutByFolder(widget.account.id, item.id);
+            }
+          }
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('\'${item.name}\'이(가) 삭제되었습니다.')),
+          );
+        } else {
+          if (!mounted) return;
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('삭제에 실패했습니다.')),
+          );
+        }
+        _loadFolder();
+      }
+    }
+  }
+
+  Future<void> _executePasteOrMove() async {
+    if (_clipboardItem == null) return;
+    final item = _clipboardItem!;
+    final targetFolderId = _folderStack.last.key;
+
+    if (widget.account.type == CloudType.local && _folderStack.length <= 1) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('드라이브 또는 대상 폴더 내부로 먼저 이동한 후 붙여넣어 주세요.')),
+      );
+      return;
+    }
+
+    if (item.id == targetFolderId) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('동일한 폴더로 이동하거나 복사할 수 없습니다.')),
+      );
+      return;
+    }
+
+    if (item.isFolder && targetFolderId != null && targetFolderId.startsWith(item.id)) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('상위 폴더를 하위 폴더로 이동하거나 복사할 수 없습니다.')),
+      );
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    bool success = false;
+    try {
+      if (_isCutMode) {
+        success = await widget.service.moveItem(item, targetFolderId ?? '');
+      } else {
+        success = await widget.service.copyItem(item, targetFolderId ?? '');
+      }
+    } catch (e) {
+      debugPrint('[BrowserScreen] 붙여넣기/이동 오류: $e');
+    }
+
+    if (mounted) {
+      final opText = _isCutMode ? '이동' : '복사';
+      if (success) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('\'${item.name}\' $opText이(가) 완료되었습니다.')),
+        );
+        setState(() {
+          _clipboardItem = null;
+        });
+      } else {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('$opText에 실패했습니다.')),
+        );
+      }
+      _loadFolder();
+    }
+  }
+
+  void _showItemOperationsMenu(BuildContext context, MediaItem item) {
+    final shortcutMgr = context.read<FolderShortcutManager>();
+    final isBookmarked = item.isFolder && shortcutMgr.isFolderShortcut(widget.account.id, item.id);
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF191E2A),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (sheetCtx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 36,
+              height: 4,
+              margin: const EdgeInsets.symmetric(vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.white24,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
+              child: Row(
+                children: [
+                  Icon(
+                    item.isFolder
+                        ? Icons.folder
+                        : (item.isVideo
+                            ? Icons.movie_creation_outlined
+                            : (item.isSubtitle ? Icons.subtitles : Icons.insert_drive_file)),
+                    color: item.isFolder
+                        ? Colors.amber
+                        : (item.isVideo
+                            ? Colors.blueAccent
+                            : (item.isSubtitle ? Colors.tealAccent : Colors.white70)),
+                    size: 24,
+                  ),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      item.name,
+                      style: const TextStyle(fontSize: 14, fontWeight: FontWeight.bold),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const Divider(color: Colors.white12, height: 12),
+            if (item.isVideo)
+              ListTile(
+                dense: true,
+                leading: const Icon(Icons.play_circle_fill, color: Colors.blueAccent),
+                title: const Text('재생'),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _playItem(item);
+                },
+              ),
+            if (item.isFolder)
+              ListTile(
+                dense: true,
+                leading: Icon(
+                  isBookmarked ? Icons.bookmark_remove : Icons.bookmark_add_outlined,
+                  color: Colors.amber,
+                ),
+                title: Text(isBookmarked ? '첫 화면 바로가기 해제' : '첫 화면 바로가기에 추가'),
+                onTap: () {
+                  Navigator.pop(sheetCtx);
+                  _toggleFolderShortcut(item, shortcutMgr, isBookmarked);
+                },
+              ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.copy_outlined, color: Colors.lightBlueAccent),
+              title: const Text('복사'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                setState(() {
+                  _clipboardItem = item;
+                  _isCutMode = false;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('\'${item.name}\' 복사 대기 중입니다. 대상 폴더에서 [붙여넣기]를 누르세요.'),
+                    duration: const Duration(seconds: 3),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.drive_file_move_outlined, color: Colors.orangeAccent),
+              title: const Text('잘라내기 (이동)'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                setState(() {
+                  _clipboardItem = item;
+                  _isCutMode = true;
+                });
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(
+                    content: Text('\'${item.name}\' 이동 대기 중입니다. 대상 폴더에서 [여기로 이동]을 누르세요.'),
+                    duration: const Duration(seconds: 3),
+                  ),
+                );
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.drive_file_rename_outline, color: Colors.tealAccent),
+              title: const Text('이름 변경'),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _promptRename(item);
+              },
+            ),
+            ListTile(
+              dense: true,
+              leading: const Icon(Icons.delete_outline, color: Colors.redAccent),
+              title: const Text('삭제', style: TextStyle(color: Colors.redAccent)),
+              onTap: () {
+                Navigator.pop(sheetCtx);
+                _confirmDelete(item);
+              },
+            ),
+            const SizedBox(height: 8),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildClipboardBar() {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+      decoration: BoxDecoration(
+        color: const Color(0xFF1E2433),
+        border: const Border(top: BorderSide(color: Colors.white24, width: 0.8)),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withAlpha(120),
+            blurRadius: 10,
+            offset: const Offset(0, -3),
+          ),
+        ],
+      ),
+      child: SafeArea(
+        top: false,
+        child: Row(
+          children: [
+            Icon(
+              _isCutMode ? Icons.drive_file_move : Icons.copy_all,
+              color: Colors.amber,
+              size: 24,
+            ),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    _isCutMode ? '이동 대기 중' : '복사 대기 중',
+                    style: const TextStyle(fontSize: 11, color: Colors.amber, fontWeight: FontWeight.bold),
+                  ),
+                  Text(
+                    _clipboardItem?.name ?? '',
+                    style: const TextStyle(fontSize: 13, color: Colors.white, fontWeight: FontWeight.w600),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton.icon(
+              style: ElevatedButton.styleFrom(
+                backgroundColor: Colors.blueAccent,
+                foregroundColor: Colors.white,
+                padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+              ),
+              icon: Icon(_isCutMode ? Icons.drive_file_move_outlined : Icons.content_paste, size: 16),
+              label: Text(_isCutMode ? '여기로 이동' : '여기에 붙여넣기', style: const TextStyle(fontSize: 12, fontWeight: FontWeight.bold)),
+              onPressed: _executePasteOrMove,
+            ),
+            const SizedBox(width: 4),
+            IconButton(
+              icon: const Icon(Icons.close, color: Colors.white60, size: 20),
+              tooltip: '취소',
+              onPressed: () {
+                setState(() {
+                  _clipboardItem = null;
+                });
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
   Widget _buildItemThumbnail(MediaItem item, PlaybackRecord? record, {double? width, double? height}) {
     if (record?.localThumbnailPath != null && File(record!.localThumbnailPath!).existsSync()) {
       return Image.file(
@@ -664,6 +1146,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
             onTap: () => _navigateToFolder(item),
+            onLongPress: () => _showItemOperationsMenu(context, item),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -692,22 +1175,41 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       Positioned(
                         top: 4,
                         right: 4,
-                        child: Container(
-                          decoration: BoxDecoration(
-                            color: Colors.black.withAlpha(140),
-                            shape: BoxShape.circle,
-                          ),
-                          child: IconButton(
-                            icon: Icon(
-                              isBookmarked ? Icons.bookmark : Icons.bookmark_add_outlined,
-                              size: 16,
-                              color: isBookmarked ? Colors.amber : Colors.white70,
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Container(
+                              decoration: BoxDecoration(
+                                color: Colors.black.withAlpha(140),
+                                shape: BoxShape.circle,
+                              ),
+                              child: IconButton(
+                                icon: Icon(
+                                  isBookmarked ? Icons.bookmark : Icons.bookmark_add_outlined,
+                                  size: 16,
+                                  color: isBookmarked ? Colors.amber : Colors.white70,
+                                ),
+                                tooltip: isBookmarked ? '바로가기 해제' : '첫 화면 바로가기 추가',
+                                padding: const EdgeInsets.all(4),
+                                constraints: const BoxConstraints(),
+                                onPressed: () => _toggleFolderShortcut(item, shortcutMgr, isBookmarked),
+                              ),
                             ),
-                            tooltip: isBookmarked ? '바로가기 해제' : '첫 화면 바로가기 추가',
-                            padding: const EdgeInsets.all(4),
-                            constraints: const BoxConstraints(),
-                            onPressed: () => _toggleFolderShortcut(item, shortcutMgr, isBookmarked),
-                          ),
+                            const SizedBox(width: 4),
+                            Container(
+                              decoration: BoxDecoration(
+                                color: Colors.black.withAlpha(140),
+                                shape: BoxShape.circle,
+                              ),
+                              child: IconButton(
+                                icon: const Icon(Icons.more_vert, size: 16, color: Colors.white70),
+                                tooltip: '옵션 더보기',
+                                padding: const EdgeInsets.all(4),
+                                constraints: const BoxConstraints(),
+                                onPressed: () => _showItemOperationsMenu(context, item),
+                              ),
+                            ),
+                          ],
                         ),
                       ),
                     ],
@@ -770,6 +1272,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           child: InkWell(
             borderRadius: BorderRadius.circular(12),
             onTap: () => _playItem(item),
+            onLongPress: () => _showItemOperationsMenu(context, item),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.stretch,
               children: [
@@ -790,6 +1293,23 @@ class _BrowserScreenState extends State<BrowserScreen> {
                             ),
                           ),
                         ),
+                      Positioned(
+                        top: 4,
+                        right: 4,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            color: Colors.black.withAlpha(140),
+                            shape: BoxShape.circle,
+                          ),
+                          child: IconButton(
+                            icon: const Icon(Icons.more_vert, size: 16, color: Colors.white70),
+                            tooltip: '옵션 더보기',
+                            padding: const EdgeInsets.all(4),
+                            constraints: const BoxConstraints(),
+                            onPressed: () => _showItemOperationsMenu(context, item),
+                          ),
+                        ),
+                      ),
                       Positioned.fill(
                         child: DecoratedBox(
                           decoration: BoxDecoration(
@@ -944,6 +1464,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           child: InkWell(
             borderRadius: BorderRadius.circular(10),
             onTap: () => _navigateToFolder(item),
+            onLongPress: () => _showItemOperationsMenu(context, item),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
@@ -977,16 +1498,29 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       ],
                     ),
                   ),
-                  IconButton(
-                    icon: Icon(
-                      isBookmarked ? Icons.bookmark : Icons.bookmark_add_outlined,
-                      size: 18,
-                      color: isBookmarked ? Colors.amber : Colors.white38,
-                    ),
-                    tooltip: isBookmarked ? '바로가기 해제' : '첫 화면 바로가기 추가',
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: () => _toggleFolderShortcut(item, shortcutMgr, isBookmarked),
+                  Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      IconButton(
+                        icon: Icon(
+                          isBookmarked ? Icons.bookmark : Icons.bookmark_add_outlined,
+                          size: 18,
+                          color: isBookmarked ? Colors.amber : Colors.white38,
+                        ),
+                        tooltip: isBookmarked ? '바로가기 해제' : '첫 화면 바로가기 추가',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        onPressed: () => _toggleFolderShortcut(item, shortcutMgr, isBookmarked),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: const Icon(Icons.more_vert, size: 18, color: Colors.white60),
+                        tooltip: '옵션 더보기',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        onPressed: () => _showItemOperationsMenu(context, item),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -1023,6 +1557,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
           child: InkWell(
             borderRadius: BorderRadius.circular(10),
             onTap: () => _playItem(item),
+            onLongPress: () => _showItemOperationsMenu(context, item),
             child: Padding(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 6),
               child: Row(
@@ -1082,6 +1617,14 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                   if (isVid)
                     const Icon(Icons.play_circle_outline, color: Colors.blueAccent, size: 20),
+                  const SizedBox(width: 4),
+                  IconButton(
+                    icon: const Icon(Icons.more_vert, size: 18, color: Colors.white60),
+                    tooltip: '옵션 더보기',
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    onPressed: () => _showItemOperationsMenu(context, item),
+                  ),
                 ],
               ),
             ),
@@ -1128,10 +1671,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
                       tooltip: isBookmarked ? '바로가기 해제' : '첫 화면 바로가기 추가',
                       onPressed: () => _toggleFolderShortcut(item, shortcutMgr, isBookmarked),
                     ),
+                    IconButton(
+                      icon: const Icon(Icons.more_vert, color: Colors.white60, size: 18),
+                      tooltip: '옵션 더보기',
+                      onPressed: () => _showItemOperationsMenu(context, item),
+                    ),
                     const Icon(Icons.chevron_right, color: Colors.grey, size: 20),
                   ],
                 ),
                 onTap: () => _navigateToFolder(item),
+                onLongPress: () => _showItemOperationsMenu(context, item),
               );
             },
           );
@@ -1186,14 +1735,24 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ],
                 ],
               ),
-              trailing: isVid
-                  ? IconButton(
+              trailing: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  if (isVid)
+                    IconButton(
                       icon: const Icon(Icons.play_circle_fill, color: Colors.blueAccent, size: 22),
                       tooltip: '재생',
                       onPressed: () => _playItem(item),
-                    )
-                  : null,
+                    ),
+                  IconButton(
+                    icon: const Icon(Icons.more_vert, color: Colors.white60, size: 18),
+                    tooltip: '옵션 더보기',
+                    onPressed: () => _showItemOperationsMenu(context, item),
+                  ),
+                ],
+              ),
               onTap: () => _playItem(item),
+              onLongPress: () => _showItemOperationsMenu(context, item),
             );
           },
         );
@@ -1227,7 +1786,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   Expanded(flex: 2, child: Text('유형', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
                   Expanded(flex: 2, child: Text('크기', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
                   Expanded(flex: 3, child: Text('길이 / 시청 정보', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
-                  SizedBox(width: 60, child: Text('액션', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
+                  SizedBox(width: 76, child: Text('액션', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
                 ],
               ),
             ),
@@ -1252,6 +1811,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         final isBookmarked = shortcutMgr.isFolderShortcut(widget.account.id, item.id);
         return InkWell(
           onTap: () => _navigateToFolder(item),
+          onLongPress: () => _showItemOperationsMenu(context, item),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: const BoxDecoration(
@@ -1292,17 +1852,30 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                 ),
                 SizedBox(
-                  width: 60,
-                  child: IconButton(
-                    icon: Icon(
-                      isBookmarked ? Icons.bookmark : Icons.bookmark_add_outlined,
-                      size: 18,
-                      color: isBookmarked ? Colors.amber : Colors.white38,
-                    ),
-                    tooltip: isBookmarked ? '바로가기 해제' : '첫 화면 바로가기 추가',
-                    padding: EdgeInsets.zero,
-                    constraints: const BoxConstraints(),
-                    onPressed: () => _toggleFolderShortcut(item, shortcutMgr, isBookmarked),
+                  width: 76,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      IconButton(
+                        icon: Icon(
+                          isBookmarked ? Icons.bookmark : Icons.bookmark_add_outlined,
+                          size: 18,
+                          color: isBookmarked ? Colors.amber : Colors.white38,
+                        ),
+                        tooltip: isBookmarked ? '바로가기 해제' : '첫 화면 바로가기 추가',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        onPressed: () => _toggleFolderShortcut(item, shortcutMgr, isBookmarked),
+                      ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: const Icon(Icons.more_vert, size: 18, color: Colors.white60),
+                        tooltip: '옵션 더보기',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        onPressed: () => _showItemOperationsMenu(context, item),
+                      ),
+                    ],
                   ),
                 ),
               ],
@@ -1338,6 +1911,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
         return InkWell(
           onTap: () => _playItem(item),
+          onLongPress: () => _showItemOperationsMenu(context, item),
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: const BoxDecoration(
@@ -1414,16 +1988,28 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   ),
                 ),
                 SizedBox(
-                  width: 60,
-                  child: isVid
-                      ? IconButton(
+                  width: 76,
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.end,
+                    children: [
+                      if (isVid)
+                        IconButton(
                           icon: const Icon(Icons.play_arrow, color: Colors.blueAccent, size: 20),
                           tooltip: '재생',
                           padding: EdgeInsets.zero,
                           constraints: const BoxConstraints(),
                           onPressed: () => _playItem(item),
-                        )
-                      : const SizedBox.shrink(),
+                        ),
+                      const SizedBox(width: 4),
+                      IconButton(
+                        icon: const Icon(Icons.more_vert, size: 18, color: Colors.white60),
+                        tooltip: '옵션 더보기',
+                        padding: EdgeInsets.zero,
+                        constraints: const BoxConstraints(),
+                        onPressed: () => _showItemOperationsMenu(context, item),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),

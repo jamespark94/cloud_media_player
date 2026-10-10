@@ -1,7 +1,5 @@
-import 'dart:io';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
-import 'package:http/http.dart' as http;
 import 'package:media_kit/media_kit.dart';
 import '../../models/media_item.dart';
 import '../../models/subtitle_settings.dart';
@@ -104,70 +102,21 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
       final filePath = files.first.path!;
       final fileName = files.first.name;
 
-      // libmpv에 로컬 자막 파일 추가
-      await widget.player.setSubtitleTrack(
-        SubtitleTrack.uri(filePath, title: fileName, language: 'ko'),
-      );
-      widget.onSubtitleChanged?.call('local', filePath, fileName, 'ko');
-
+      // 사용자 탭 즉시 창을 닫아 지연감 해소
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('자막을 적용했습니다: $fileName'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
         Navigator.pop(context);
       }
+      widget.onSubtitleChanged?.call('local', filePath, fileName, 'ko');
     }
   }
 
   Future<void> _applyCloudSubtitle(MediaItem subItem) async {
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content: Text('클라우드 자막 로딩 중: ${subItem.name}'),
-        duration: const Duration(seconds: 2),
-      ),
-    );
-
-    try {
-      final url = await widget.service.getStreamUrl(subItem);
-      final headers = await widget.service.getStreamHeaders();
-
-      // 클라우드 자막 파일을 로컬 캐시 폴더에 다운로드하여 인코딩(CP949/UTF-8)을 보존하며 mpv에 로드
-      final res = await http.get(Uri.parse(url), headers: headers);
-      if (res.statusCode == 200) {
-        final tempDir = Directory.systemTemp;
-        final localSubFile = File('${tempDir.path}/${subItem.id}_${subItem.name}');
-        await localSubFile.writeAsBytes(res.bodyBytes);
-
-        await widget.player.setSubtitleTrack(
-          SubtitleTrack.uri(localSubFile.path, title: subItem.name, language: 'ko'),
-        );
-        widget.onSubtitleChanged?.call('cloud', subItem.id, subItem.name, 'ko');
-
-        if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(
-              content: Text('자막이 적용되었습니다: ${subItem.name}'),
-              duration: const Duration(seconds: 2),
-            ),
-          );
-          Navigator.pop(context);
-        }
-      } else {
-        throw Exception('자막 다운로드 실패 (${res.statusCode})');
-      }
-    } catch (e) {
-      if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-            content: Text('자막 로드 오류: $e'),
-            duration: const Duration(seconds: 2),
-          ),
-        );
-      }
+    // 사용자 탭 즉시 창을 닫아 지연감 해소
+    if (mounted) {
+      Navigator.pop(context);
     }
+    // 자막 다운로드 및 mpv 적용은 상위 PlayerScreen에서 비동기로 안전하게 인계
+    widget.onSubtitleChanged?.call('cloud', subItem.id, subItem.name, 'ko');
   }
 
   @override

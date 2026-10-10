@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import 'package:xml/xml.dart';
 import '../models/media_item.dart';
@@ -78,5 +79,97 @@ class WebDavService extends CloudService {
     return {
       'Authorization': _authHeader,
     };
+  }
+
+  @override
+  Future<bool> renameItem(MediaItem item, String newName) async {
+    try {
+      final baseUrl = account.webDavUrl ?? '';
+      final parent = item.parentId ?? '';
+      final newHref = parent.endsWith('/') ? '$parent$newName' : '$parent/$newName';
+      final req = http.Request('MOVE', Uri.parse('$baseUrl${item.id}'))
+        ..headers.addAll({
+          'Authorization': _authHeader,
+          'Destination': '$baseUrl$newHref',
+          'Overwrite': 'F',
+        });
+      final res = await req.send();
+      return res.statusCode >= 200 && res.statusCode < 300;
+    } catch (e) {
+      debugPrint('[WebDavService] 이름 변경 실패: $e');
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> deleteItem(MediaItem item) async {
+    try {
+      final baseUrl = account.webDavUrl ?? '';
+      final req = http.Request('DELETE', Uri.parse('$baseUrl${item.id}'))
+        ..headers.addAll({
+          'Authorization': _authHeader,
+        });
+      final res = await req.send();
+      return res.statusCode >= 200 && res.statusCode < 300;
+    } catch (e) {
+      debugPrint('[WebDavService] 삭제 실패: $e');
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> moveItem(MediaItem item, String targetFolderId) async {
+    try {
+      final baseUrl = account.webDavUrl ?? '';
+      final newHref = targetFolderId.endsWith('/') ? '$targetFolderId${item.name}' : '$targetFolderId/${item.name}';
+      final req = http.Request('MOVE', Uri.parse('$baseUrl${item.id}'))
+        ..headers.addAll({
+          'Authorization': _authHeader,
+          'Destination': '$baseUrl$newHref',
+          'Overwrite': 'F',
+        });
+      final res = await req.send();
+      return res.statusCode >= 200 && res.statusCode < 300;
+    } catch (e) {
+      debugPrint('[WebDavService] 이동 실패: $e');
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> copyItem(MediaItem item, String targetFolderId) async {
+    try {
+      final baseUrl = account.webDavUrl ?? '';
+      final newHref = targetFolderId.endsWith('/') ? '$targetFolderId${item.name}' : '$targetFolderId/${item.name}';
+      final req = http.Request('COPY', Uri.parse('$baseUrl${item.id}'))
+        ..headers.addAll({
+          'Authorization': _authHeader,
+          'Destination': '$baseUrl$newHref',
+          'Overwrite': 'F',
+        });
+      final res = await req.send();
+      return res.statusCode >= 200 && res.statusCode < 300;
+    } catch (e) {
+      debugPrint('[WebDavService] 복사 실패: $e');
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> createFolder(String folderName, {String? parentFolderId}) async {
+    try {
+      final baseUrl = account.webDavUrl ?? '';
+      final parent = parentFolderId ?? '';
+      final newHref = parent.endsWith('/') ? '$parent$folderName/' : '$parent/$folderName/';
+      final req = http.Request('MKCOL', Uri.parse('$baseUrl$newHref'))
+        ..headers.addAll({
+          'Authorization': _authHeader,
+        });
+      final res = await req.send();
+      return res.statusCode >= 200 && res.statusCode < 300;
+    } catch (e) {
+      debugPrint('[WebDavService] 새 폴더 생성 실패: $e');
+    }
+    return false;
   }
 }

@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/media_item.dart';
@@ -366,6 +367,142 @@ class LocalDiskService extends CloudService {
   @override
   Future<String?> getThumbnailUrl(MediaItem item) async {
     return null;
+  }
+
+  @override
+  Future<bool> renameItem(MediaItem item, String newName) async {
+    try {
+      final parent = File(item.id).parent.path;
+      final newPath = '$parent${Platform.pathSeparator}$newName';
+      if (item.isFolder) {
+        final dir = Directory(item.id);
+        if (await dir.exists()) {
+          await dir.rename(newPath);
+          return true;
+        }
+      } else {
+        final file = File(item.id);
+        if (await file.exists()) {
+          await file.rename(newPath);
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('[LocalDiskService] 이름 변경 실패: $e');
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> deleteItem(MediaItem item) async {
+    try {
+      if (item.isFolder) {
+        final dir = Directory(item.id);
+        if (await dir.exists()) {
+          await dir.delete(recursive: true);
+          return true;
+        }
+      } else {
+        final file = File(item.id);
+        if (await file.exists()) {
+          await file.delete();
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('[LocalDiskService] 삭제 실패: $e');
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> moveItem(MediaItem item, String targetFolderId) async {
+    try {
+      final newPath = '$targetFolderId${Platform.pathSeparator}${item.name}';
+      if (item.isFolder) {
+        final dir = Directory(item.id);
+        if (await dir.exists()) {
+          try {
+            await dir.rename(newPath);
+            return true;
+          } catch (_) {
+            // 다른 디스크/볼륨 간 이동 시 복사 후 삭제 폴백
+            final ok = await copyItem(item, targetFolderId);
+            if (ok) await deleteItem(item);
+            return ok;
+          }
+        }
+      } else {
+        final file = File(item.id);
+        if (await file.exists()) {
+          try {
+            await file.rename(newPath);
+            return true;
+          } catch (_) {
+            final ok = await copyItem(item, targetFolderId);
+            if (ok) await deleteItem(item);
+            return ok;
+          }
+        }
+      }
+    } catch (e) {
+      debugPrint('[LocalDiskService] 이동 실패: $e');
+    }
+    return false;
+  }
+
+  @override
+  Future<bool> copyItem(MediaItem item, String targetFolderId) async {
+    try {
+      final newPath = '$targetFolderId${Platform.pathSeparator}${item.name}';
+      if (item.isFolder) {
+        final srcDir = Directory(item.id);
+        final dstDir = Directory(newPath);
+        if (await srcDir.exists()) {
+          await _copyDirectory(srcDir, dstDir);
+          return true;
+        }
+      } else {
+        final srcFile = File(item.id);
+        if (await srcFile.exists()) {
+          await srcFile.copy(newPath);
+          return true;
+        }
+      }
+    } catch (e) {
+      debugPrint('[LocalDiskService] 복사 실패: $e');
+    }
+    return false;
+  }
+
+  Future<void> _copyDirectory(Directory src, Directory dst) async {
+    if (!await dst.exists()) {
+      await dst.create(recursive: true);
+    }
+    await for (final entity in src.list(recursive: false)) {
+      final name = _getBasename(entity.path);
+      final destPath = '${dst.path}${Platform.pathSeparator}$name';
+      if (entity is Directory) {
+        await _copyDirectory(entity, Directory(destPath));
+      } else if (entity is File) {
+        await entity.copy(destPath);
+      }
+    }
+  }
+
+  @override
+  Future<bool> createFolder(String folderName, {String? parentFolderId}) async {
+    try {
+      if (parentFolderId == null || parentFolderId.isEmpty) return false;
+      final newDir = Directory('$parentFolderId${Platform.pathSeparator}$folderName');
+      if (!await newDir.exists()) {
+        await newDir.create(recursive: true);
+        return true;
+      }
+    } catch (e) {
+      debugPrint('[LocalDiskService] 새 폴더 생성 실패: $e');
+    }
+    return false;
   }
 }
 
