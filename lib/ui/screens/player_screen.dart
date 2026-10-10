@@ -10,7 +10,10 @@ import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
+import 'package:provider/provider.dart';
 import '../../models/media_item.dart';
+import '../../services/account_manager.dart';
+import '../../services/cloud_playback_sync_service.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/local_stream_proxy.dart';
 import '../../services/playback_history_service.dart';
@@ -929,6 +932,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       );
       if (!_hasCapturedThumbnail) {
         _captureThumbnailIfNeeded();
+      }
+      if (mounted) {
+        try {
+          final accountMgr = context.read<AccountManager>();
+          CloudPlaybackSyncService.instance.scheduleAutoPush(accountMgr);
+        } catch (_) {}
       }
     }
   }

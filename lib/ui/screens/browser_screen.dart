@@ -7,6 +7,8 @@ import 'package:permission_handler/permission_handler.dart';
 import '../../models/cloud_account.dart';
 import '../../models/folder_shortcut.dart';
 import '../../models/media_item.dart';
+import '../../services/account_manager.dart';
+import '../../services/cloud_playback_sync_service.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/folder_shortcut_manager.dart';
 import '../../services/local_disk_service.dart';
@@ -542,7 +544,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
           ),
         ),
       );
-      if (mounted) setState(() {});
+      if (mounted) {
+        setState(() {});
+        final accountMgr = context.read<AccountManager>();
+        CloudPlaybackSyncService.instance.syncPlaybackRecords(accountMgr, silent: true);
+      }
     } else {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('동영상 파일만 재생할 수 있습니다.')),

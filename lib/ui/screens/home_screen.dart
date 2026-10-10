@@ -8,6 +8,7 @@ import '../../models/cloud_account.dart';
 import '../../models/folder_shortcut.dart';
 import '../../models/media_item.dart';
 import '../../services/account_manager.dart';
+import '../../services/cloud_playback_sync_service.dart';
 import '../../services/folder_shortcut_manager.dart';
 import '../../services/playback_history_service.dart';
 import '../../utils/permission_utils.dart';
@@ -45,6 +46,42 @@ class _HomeScreenState extends State<HomeScreen> {
   void initState() {
     super.initState();
     _loadViewMode();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _silentSyncWithCloud();
+    });
+  }
+
+  Future<void> _silentSyncWithCloud() async {
+    if (!mounted) return;
+    final accountMgr = context.read<AccountManager>();
+    await CloudPlaybackSyncService.instance.syncPlaybackRecords(accountMgr, silent: true);
+  }
+
+  Future<void> _manualSyncWithCloud(BuildContext context) async {
+    final accountMgr = context.read<AccountManager>();
+    final syncService = CloudPlaybackSyncService.instance;
+    final success = await syncService.syncPlaybackRecords(accountMgr);
+
+    if (context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Row(
+            children: [
+              Icon(
+                success ? Icons.cloud_done : Icons.cloud_off,
+                color: success ? Colors.tealAccent : Colors.orangeAccent,
+                size: 20,
+              ),
+              const SizedBox(width: 10),
+              Expanded(child: Text(syncService.lastSyncMessage ?? '동기화 완료')),
+            ],
+          ),
+          backgroundColor: const Color(0xFF222B38),
+          behavior: SnackBarBehavior.floating,
+          duration: const Duration(seconds: 4),
+        ),
+      );
+    }
   }
 
   Future<void> _loadViewMode() async {
@@ -144,6 +181,26 @@ class _HomeScreenState extends State<HomeScreen> {
             }).toList(),
           ),
           const SizedBox(width: 4),
+          // 디바이스 간 재생 기록 동기화 버튼
+          AnimatedBuilder(
+            animation: CloudPlaybackSyncService.instance,
+            builder: (context, _) {
+              final syncService = CloudPlaybackSyncService.instance;
+              return IconButton(
+                icon: syncService.isSyncing
+                    ? const SizedBox(
+                        width: 18,
+                        height: 18,
+                        child: CircularProgressIndicator(strokeWidth: 2, color: Colors.blueAccent),
+                      )
+                    : const Icon(Icons.sync, color: Colors.blueAccent),
+                tooltip: syncService.isSyncing
+                    ? '클라우드 재생 기록 동기화 중...'
+                    : '클라우드 재생 기록 동기화',
+                onPressed: syncService.isSyncing ? null : () => _manualSyncWithCloud(context),
+              );
+            },
+          ),
           IconButton(
             icon: const Icon(Icons.file_open_outlined),
             tooltip: '로컬 파일 직접 열기',
@@ -236,22 +293,30 @@ class _HomeScreenState extends State<HomeScreen> {
           _prefetchMissingThumbnails(historyList, accountManager);
         }
 
-        return ListView(
-          padding: const EdgeInsets.fromLTRB(16, 16, 16, 80),
-          children: [
-            // 1. 플레이 히스토리 (최근 시청 목록)
-            if (historyList.isNotEmpty) ...[
-              _buildHistorySection(context, historyList, accountManager),
+        return RefreshIndicator(
+          onRefresh: () async {
+            await accountManager.loadAccounts();
+            await shortcutManager.loadShortcuts();
+            await CloudPlaybackSyncService.instance.syncPlaybackRecords(accountManager);
+            if (mounted) setState(() {});
+          },
+          child: ListView(
+            padding: const EdgeInsets.fromLTRB(16, 16, 16, 80),
+            children: [
+              // 1. 플레이 히스토리 (최근 시청 목록)
+              if (historyList.isNotEmpty) ...[
+                _buildHistorySection(context, historyList, accountManager),
+                const SizedBox(height: 24),
+              ],
+
+              // 2. 폴더 바로가기 (즐겨찾기)
+              _buildShortcutSection(context, shortcutManager, accountManager),
               const SizedBox(height: 24),
+
+              // 3. 연결된 클라우드 드라이브
+              _buildAccountSection(context, accounts, accountManager),
             ],
-
-            // 2. 폴더 바로가기 (즐겨찾기)
-            _buildShortcutSection(context, shortcutManager, accountManager),
-            const SizedBox(height: 24),
-
-            // 3. 연결된 클라우드 드라이브
-            _buildAccountSection(context, accounts, accountManager),
-          ],
+          ),
         );
       },
     );
@@ -1970,35 +2035,28 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   void _playHistoryItem(BuildContext context, PlaybackRecord record, AccountManager accountManager) {
-    final account = accountManager.getAccountById(record.accountId);
+    final account = accountManager.findMatchingAccount(
+      accountId: record.accountId,
+      cloudType: CloudType.values.firstWhere(
+        (t) => record.accountId.startsWith(t.name) || (record.accountId == 'local' && t == CloudType.local),
+        orElse: () => CloudType.googleDrive,
+      ),
+    );
 
-    if (account != null) {
-      final service = accountManager.getService(account);
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => PlayerScreen(
-            item: record.toMediaItem(),
-            service: service,
-          ),
+    final service = accountManager.getService(account);
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PlayerScreen(
+          item: record.toMediaItem(),
+          service: service,
         ),
-      );
-    } else {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('\'${record.fileName}\'의 연결된 계정을 찾을 수 없습니다.'),
-          action: SnackBarAction(
-            label: '기록 삭제',
-            onPressed: () {
-              PlaybackHistoryService.instance.removeRecord(
-                accountId: record.accountId,
-                itemId: record.itemId,
-              );
-            },
-          ),
-        ),
-      );
-    }
+      ),
+    ).then((_) {
+      if (mounted) {
+        CloudPlaybackSyncService.instance.syncPlaybackRecords(accountManager, silent: true);
+      }
+    });
   }
 
   void _removeHistoryRecord(PlaybackRecord record) {

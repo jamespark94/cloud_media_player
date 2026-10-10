@@ -29,6 +29,39 @@ class AccountManager extends ChangeNotifier {
     return _accounts.cast<CloudAccount?>().firstWhere((a) => a?.id == id, orElse: () => null);
   }
 
+  /// 타 기기에서 동기화된 계정 ID가 현재 기기와 다를 때 스마트하게 매칭
+  CloudAccount findMatchingAccount({
+    required String accountId,
+    required CloudType cloudType,
+    String? email,
+  }) {
+    if (accountId == 'local' || cloudType == CloudType.local) {
+      return localAccount;
+    }
+
+    // 1. ID 직접 일치
+    final byId = getAccountById(accountId);
+    if (byId != null) return byId;
+
+    // 2. 이메일 일치
+    if (email != null && email.isNotEmpty) {
+      final byEmail = _accounts.cast<CloudAccount?>().firstWhere(
+        (a) => a?.email.toLowerCase() == email.toLowerCase(),
+        orElse: () => null,
+      );
+      if (byEmail != null) return byEmail;
+    }
+
+    // 3. 동일한 CloudType을 가진 첫 번째 계정
+    final byType = _accounts.cast<CloudAccount?>().firstWhere(
+      (a) => a?.type == cloudType,
+      orElse: () => null,
+    );
+    if (byType != null) return byType;
+
+    return localAccount;
+  }
+
   Future<void> loadAccounts() async {
     final prefs = await SharedPreferences.getInstance();
     final data = prefs.getString(_storageKey);

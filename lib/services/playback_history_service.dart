@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math' as math;
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/media_item.dart';
@@ -163,6 +164,61 @@ class PlaybackHistoryService extends ChangeNotifier {
     } catch (e) {
       debugPrint('재생 기록 저장 실패: $e');
     }
+  }
+
+  /// 전체 기록 목록 반환
+  Future<List<PlaybackRecord>> getAllRecords() async {
+    final all = await _loadAll();
+    return all.values.toList();
+  }
+
+  /// 원격 클라우드 재생 기록 목록과 로컬 목록을 스마트 병합
+  Future<List<PlaybackRecord>> mergeWithRemote(List<PlaybackRecord> remoteRecords) async {
+    final all = await _loadAll();
+
+    for (final remote in remoteRecords) {
+      final key = _generateKey(remote.accountId, remote.itemId);
+      final existing = all[key] ?? all.values.cast<PlaybackRecord?>().firstWhere(
+        (r) => r?.fileName == remote.fileName,
+        orElse: () => null,
+      );
+
+      if (existing == null) {
+        all[key] = remote;
+      } else {
+        final bool remoteIsNewer = remote.lastUpdated > existing.lastUpdated;
+        final newerRecord = remoteIsNewer ? remote : existing;
+        final olderRecord = remoteIsNewer ? existing : remote;
+
+        int resolvedPosition = newerRecord.positionMillis;
+        if (resolvedPosition < 5000 && olderRecord.positionMillis > resolvedPosition) {
+          resolvedPosition = olderRecord.positionMillis;
+        }
+
+        final merged = PlaybackRecord(
+          itemId: existing.itemId.isNotEmpty ? existing.itemId : remote.itemId,
+          accountId: existing.accountId.isNotEmpty ? existing.accountId : remote.accountId,
+          fileName: existing.fileName.isNotEmpty ? existing.fileName : remote.fileName,
+          parentId: existing.parentId ?? remote.parentId,
+          fileSize: existing.fileSize ?? remote.fileSize,
+          positionMillis: resolvedPosition,
+          durationMillis: newerRecord.durationMillis > 0 ? newerRecord.durationMillis : olderRecord.durationMillis,
+          lastUpdated: math.max(existing.lastUpdated, remote.lastUpdated),
+          subtitleType: newerRecord.subtitleType ?? olderRecord.subtitleType,
+          subtitleId: newerRecord.subtitleId ?? olderRecord.subtitleId,
+          subtitleName: newerRecord.subtitleName ?? olderRecord.subtitleName,
+          subtitleLanguage: newerRecord.subtitleLanguage ?? olderRecord.subtitleLanguage,
+          thumbnailUrl: existing.thumbnailUrl ?? remote.thumbnailUrl,
+          localThumbnailPath: existing.localThumbnailPath ?? remote.localThumbnailPath,
+        );
+        all[key] = merged;
+      }
+    }
+
+    _cache = all;
+    await _saveAll();
+    notifyListeners();
+    return getHistoryList();
   }
 
   /// 최근 재생한 기록 목록을 최신 재생순(lastUpdated 내림차순)으로 반환합니다.
