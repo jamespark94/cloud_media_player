@@ -43,10 +43,10 @@ abstract class CloudService {
   Future<bool> deleteItem(MediaItem item) async => false;
 
   /// 파일 또는 폴더를 대상 폴더로 이동합니다.
-  Future<bool> moveItem(MediaItem item, String targetFolderId) async => false;
+  Future<bool> moveItem(MediaItem item, String targetFolderId, {String? newName, bool overwrite = false}) async => false;
 
   /// 파일 또는 폴더를 대상 폴더로 복사합니다.
-  Future<bool> copyItem(MediaItem item, String targetFolderId) async => false;
+  Future<bool> copyItem(MediaItem item, String targetFolderId, {String? newName, bool overwrite = false}) async => false;
 
   /// 현재 또는 지정한 폴더 내에 새 폴더를 생성합니다.
   Future<bool> createFolder(String folderName, {String? parentFolderId}) async => false;

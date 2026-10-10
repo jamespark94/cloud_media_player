@@ -167,12 +167,25 @@ class GoogleDriveService extends CloudService {
   }
 
   @override
-  Future<bool> moveItem(MediaItem item, String targetFolderId) async {
+  Future<bool> moveItem(
+    MediaItem item,
+    String targetFolderId, {
+    String? newName,
+    bool overwrite = false,
+  }) async {
     try {
       await refreshTokensIfNeeded();
       final oldParent = item.parentId ?? 'root';
       final url = 'https://www.googleapis.com/drive/v3/files/${item.id}?addParents=$targetFolderId&removeParents=$oldParent';
-      final res = await http.patch(Uri.parse(url), headers: await getStreamHeaders());
+      final headers = Map<String, String>.from(await getStreamHeaders())..['Content-Type'] = 'application/json';
+      final bodyMap = (newName != null && newName.isNotEmpty && newName != item.name)
+          ? {'name': newName}
+          : null;
+      final res = await http.patch(
+        Uri.parse(url),
+        headers: headers,
+        body: bodyMap != null ? jsonEncode(bodyMap) : null,
+      );
       return res.statusCode == 200;
     } catch (e) {
       debugPrint('[GoogleDriveService] 이동 실패: $e');
@@ -181,12 +194,23 @@ class GoogleDriveService extends CloudService {
   }
 
   @override
-  Future<bool> copyItem(MediaItem item, String targetFolderId) async {
+  Future<bool> copyItem(
+    MediaItem item,
+    String targetFolderId, {
+    String? newName,
+    bool overwrite = false,
+  }) async {
     try {
       await refreshTokensIfNeeded();
       final url = 'https://www.googleapis.com/drive/v3/files/${item.id}/copy';
       final headers = Map<String, String>.from(await getStreamHeaders())..['Content-Type'] = 'application/json';
-      final res = await http.post(Uri.parse(url), headers: headers, body: jsonEncode({'parents': [targetFolderId]}));
+      final bodyMap = <String, dynamic>{
+        'parents': [targetFolderId],
+      };
+      if (newName != null && newName.isNotEmpty) {
+        bodyMap['name'] = newName;
+      }
+      final res = await http.post(Uri.parse(url), headers: headers, body: jsonEncode(bodyMap));
       return res.statusCode == 200;
     } catch (e) {
       debugPrint('[GoogleDriveService] 복사 실패: $e');

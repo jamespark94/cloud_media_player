@@ -28,6 +28,18 @@ enum BrowserViewMode {
   const BrowserViewMode(this.label, this.icon);
 }
 
+enum ConflictResolution {
+  rename,
+  overwrite,
+  cancel,
+}
+
+class ConflictResolutionResult {
+  final ConflictResolution resolution;
+  final String? newName;
+  const ConflictResolutionResult(this.resolution, [this.newName]);
+}
+
 class BrowserScreen extends StatefulWidget {
   final CloudAccount account;
   final CloudService service;
@@ -57,6 +69,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // File operations clipboard state
   MediaItem? _clipboardItem;
   bool _isCutMode = false;
+  String? _clipboardSourceFolderId;
   
   // Navigation stack (folderId, folderName)
   late final List<MapEntry<String?, String>> _folderStack;
@@ -806,6 +819,129 @@ class _BrowserScreenState extends State<BrowserScreen> {
     }
   }
 
+  String _generateCopyName({
+    required String originalName,
+    required bool isFolder,
+    required Iterable<String> existingNames,
+    bool isSameFolder = true,
+  }) {
+    String baseName;
+    String extension;
+
+    if (!isFolder && originalName.contains('.') && originalName.lastIndexOf('.') > 0) {
+      final dotIndex = originalName.lastIndexOf('.');
+      baseName = originalName.substring(0, dotIndex);
+      extension = originalName.substring(dotIndex);
+    } else {
+      baseName = originalName;
+      extension = '';
+    }
+
+    if (isSameFolder) {
+      String candidate = '$baseName - 복사본$extension';
+      if (!existingNames.any((n) => n.toLowerCase() == candidate.toLowerCase())) {
+        return candidate;
+      }
+      int count = 2;
+      while (true) {
+        candidate = '$baseName - 복사본 ($count)$extension';
+        if (!existingNames.any((n) => n.toLowerCase() == candidate.toLowerCase())) {
+          return candidate;
+        }
+        count++;
+      }
+    } else {
+      int count = 1;
+      while (true) {
+        final candidate = '$baseName ($count)$extension';
+        if (!existingNames.any((n) => n.toLowerCase() == candidate.toLowerCase())) {
+          return candidate;
+        }
+        count++;
+      }
+    }
+  }
+
+  Future<ConflictResolutionResult?> _showConflictDialog({
+    required MediaItem item,
+    required bool isCutMode,
+    required String suggestedName,
+  }) async {
+    final nameController = TextEditingController(text: suggestedName);
+    return showDialog<ConflictResolutionResult>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        backgroundColor: const Color(0xFF1E2433),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(14)),
+        title: Row(
+          children: const [
+            Icon(Icons.warning_amber_rounded, color: Colors.amber, size: 24),
+            SizedBox(width: 8),
+            Text('이름 중복 확인', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '대상 폴더에 이미 동일한 이름의 \'${item.name}\' ${item.isFolder ? '폴더' : '파일'}이(가) 존재합니다.',
+              style: const TextStyle(fontSize: 13, height: 1.4),
+            ),
+            const SizedBox(height: 14),
+            const Text(
+              '새 이름으로 변경하여 둘 다 유지:',
+              style: TextStyle(fontSize: 12, color: Colors.white70),
+            ),
+            const SizedBox(height: 6),
+            TextField(
+              controller: nameController,
+              autofocus: false,
+              style: const TextStyle(fontSize: 13),
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                isDense: true,
+                contentPadding: EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx, const ConflictResolutionResult(ConflictResolution.cancel)),
+            child: const Text('취소', style: TextStyle(color: Colors.white60)),
+          ),
+          OutlinedButton(
+            style: OutlinedButton.styleFrom(
+              foregroundColor: Colors.redAccent,
+              side: const BorderSide(color: Colors.redAccent),
+            ),
+            onPressed: () => Navigator.pop(ctx, const ConflictResolutionResult(ConflictResolution.overwrite)),
+            child: const Text('덮어쓰기'),
+          ),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.blueAccent),
+            onPressed: () {
+              final customName = nameController.text.trim();
+              Navigator.pop(
+                ctx,
+                ConflictResolutionResult(
+                  ConflictResolution.rename,
+                  customName.isNotEmpty ? customName : suggestedName,
+                ),
+              );
+            },
+            child: Text(
+              isCutMode ? '이름 변경 후 이동' : '이름 변경 후 복사',
+              style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Future<void> _executePasteOrMove() async {
     if (_clipboardItem == null) return;
     final item = _clipboardItem!;
@@ -832,6 +968,55 @@ class _BrowserScreenState extends State<BrowserScreen> {
       return;
     }
 
+    final isSameFolder = _clipboardSourceFolderId == targetFolderId;
+
+    if (_isCutMode && isSameFolder) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('이미 동일한 폴더에 위치해 있습니다.')),
+      );
+      return;
+    }
+
+    final existingNames = _allItems.map((e) => e.name).toList();
+    final hasNameConflict = existingNames.any((n) => n.toLowerCase() == item.name.toLowerCase());
+
+    String? finalName;
+    bool overwrite = false;
+
+    if (!_isCutMode && isSameFolder) {
+      // 1. 동일한 폴더 내 복사: 자동으로 "파일명 - 복사본" 부여
+      finalName = _generateCopyName(
+        originalName: item.name,
+        isFolder: item.isFolder,
+        existingNames: existingNames,
+        isSameFolder: true,
+      );
+    } else if (hasNameConflict) {
+      // 2. 다른 폴더에 동일 이름이 이미 존재하는 경우: 충돌 해결 다이얼로그
+      final suggestedName = _generateCopyName(
+        originalName: item.name,
+        isFolder: item.isFolder,
+        existingNames: existingNames,
+        isSameFolder: false,
+      );
+      final result = await _showConflictDialog(
+        item: item,
+        isCutMode: _isCutMode,
+        suggestedName: suggestedName,
+      );
+
+      if (result == null || result.resolution == ConflictResolution.cancel) {
+        return;
+      }
+
+      if (result.resolution == ConflictResolution.overwrite) {
+        overwrite = true;
+        finalName = item.name;
+      } else if (result.resolution == ConflictResolution.rename) {
+        finalName = result.newName ?? suggestedName;
+      }
+    }
+
     setState(() {
       _isLoading = true;
     });
@@ -839,9 +1024,19 @@ class _BrowserScreenState extends State<BrowserScreen> {
     bool success = false;
     try {
       if (_isCutMode) {
-        success = await widget.service.moveItem(item, targetFolderId ?? '');
+        success = await widget.service.moveItem(
+          item,
+          targetFolderId ?? '',
+          newName: finalName,
+          overwrite: overwrite,
+        );
       } else {
-        success = await widget.service.copyItem(item, targetFolderId ?? '');
+        success = await widget.service.copyItem(
+          item,
+          targetFolderId ?? '',
+          newName: finalName,
+          overwrite: overwrite,
+        );
       }
     } catch (e) {
       debugPrint('[BrowserScreen] 붙여넣기/이동 오류: $e');
@@ -850,11 +1045,13 @@ class _BrowserScreenState extends State<BrowserScreen> {
     if (mounted) {
       final opText = _isCutMode ? '이동' : '복사';
       if (success) {
+        final displayName = finalName ?? item.name;
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('\'${item.name}\' $opText이(가) 완료되었습니다.')),
+          SnackBar(content: Text('\'$displayName\' $opText이(가) 완료되었습니다.')),
         );
         setState(() {
           _clipboardItem = null;
+          _clipboardSourceFolderId = null;
         });
       } else {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -950,6 +1147,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 setState(() {
                   _clipboardItem = item;
                   _isCutMode = false;
+                  _clipboardSourceFolderId = _folderStack.last.key;
                 });
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
@@ -968,6 +1166,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 setState(() {
                   _clipboardItem = item;
                   _isCutMode = true;
+                  _clipboardSourceFolderId = _folderStack.last.key;
                 });
                 ScaffoldMessenger.of(context).showSnackBar(
                   SnackBar(
@@ -1062,6 +1261,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
               onPressed: () {
                 setState(() {
                   _clipboardItem = null;
+                  _clipboardSourceFolderId = null;
                 });
               },
             ),

@@ -118,15 +118,21 @@ class WebDavService extends CloudService {
   }
 
   @override
-  Future<bool> moveItem(MediaItem item, String targetFolderId) async {
+  Future<bool> moveItem(
+    MediaItem item,
+    String targetFolderId, {
+    String? newName,
+    bool overwrite = false,
+  }) async {
     try {
       final baseUrl = account.webDavUrl ?? '';
-      final newHref = targetFolderId.endsWith('/') ? '$targetFolderId${item.name}' : '$targetFolderId/${item.name}';
+      final nameToUse = newName ?? item.name;
+      final newHref = targetFolderId.endsWith('/') ? '$targetFolderId$nameToUse' : '$targetFolderId/$nameToUse';
       final req = http.Request('MOVE', Uri.parse('$baseUrl${item.id}'))
         ..headers.addAll({
           'Authorization': _authHeader,
           'Destination': '$baseUrl$newHref',
-          'Overwrite': 'F',
+          'Overwrite': overwrite ? 'T' : 'F',
         });
       final res = await req.send();
       return res.statusCode >= 200 && res.statusCode < 300;
@@ -137,15 +143,21 @@ class WebDavService extends CloudService {
   }
 
   @override
-  Future<bool> copyItem(MediaItem item, String targetFolderId) async {
+  Future<bool> copyItem(
+    MediaItem item,
+    String targetFolderId, {
+    String? newName,
+    bool overwrite = false,
+  }) async {
     try {
       final baseUrl = account.webDavUrl ?? '';
-      final newHref = targetFolderId.endsWith('/') ? '$targetFolderId${item.name}' : '$targetFolderId/${item.name}';
+      final nameToUse = newName ?? item.name;
+      final newHref = targetFolderId.endsWith('/') ? '$targetFolderId$nameToUse' : '$targetFolderId/$nameToUse';
       final req = http.Request('COPY', Uri.parse('$baseUrl${item.id}'))
         ..headers.addAll({
           'Authorization': _authHeader,
           'Destination': '$baseUrl$newHref',
-          'Overwrite': 'F',
+          'Overwrite': overwrite ? 'T' : 'F',
         });
       final res = await req.send();
       return res.statusCode >= 200 && res.statusCode < 300;

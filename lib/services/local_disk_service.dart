@@ -416,30 +416,44 @@ class LocalDiskService extends CloudService {
   }
 
   @override
-  Future<bool> moveItem(MediaItem item, String targetFolderId) async {
+  Future<bool> moveItem(
+    MediaItem item,
+    String targetFolderId, {
+    String? newName,
+    bool overwrite = false,
+  }) async {
     try {
-      final newPath = '$targetFolderId${Platform.pathSeparator}${item.name}';
+      final nameToUse = newName ?? item.name;
+      final newPath = '$targetFolderId${Platform.pathSeparator}$nameToUse';
       if (item.isFolder) {
         final dir = Directory(item.id);
+        final targetDir = Directory(newPath);
         if (await dir.exists()) {
+          if (overwrite && await targetDir.exists() && targetDir.path.toLowerCase() != dir.path.toLowerCase()) {
+            await targetDir.delete(recursive: true);
+          }
           try {
             await dir.rename(newPath);
             return true;
           } catch (_) {
             // 다른 디스크/볼륨 간 이동 시 복사 후 삭제 폴백
-            final ok = await copyItem(item, targetFolderId);
+            final ok = await copyItem(item, targetFolderId, newName: newName, overwrite: overwrite);
             if (ok) await deleteItem(item);
             return ok;
           }
         }
       } else {
         final file = File(item.id);
+        final targetFile = File(newPath);
         if (await file.exists()) {
+          if (overwrite && await targetFile.exists() && targetFile.path.toLowerCase() != file.path.toLowerCase()) {
+            await targetFile.delete();
+          }
           try {
             await file.rename(newPath);
             return true;
           } catch (_) {
-            final ok = await copyItem(item, targetFolderId);
+            final ok = await copyItem(item, targetFolderId, newName: newName, overwrite: overwrite);
             if (ok) await deleteItem(item);
             return ok;
           }
@@ -452,19 +466,44 @@ class LocalDiskService extends CloudService {
   }
 
   @override
-  Future<bool> copyItem(MediaItem item, String targetFolderId) async {
+  Future<bool> copyItem(
+    MediaItem item,
+    String targetFolderId, {
+    String? newName,
+    bool overwrite = false,
+  }) async {
     try {
-      final newPath = '$targetFolderId${Platform.pathSeparator}${item.name}';
+      var nameToUse = newName ?? item.name;
+      var newPath = '$targetFolderId${Platform.pathSeparator}$nameToUse';
+
+      // newName이 지정되지 않았고 동일 파일이 이미 존재하며 overwrite가 false인 경우 자동 고유 이름 생성
+      if (newName == null && !overwrite) {
+        final exists = item.isFolder
+            ? await Directory(newPath).exists()
+            : await File(newPath).exists();
+        if (exists) {
+          nameToUse = _getUniqueNameForDisk(targetFolderId, item.name, item.isFolder);
+          newPath = '$targetFolderId${Platform.pathSeparator}$nameToUse';
+        }
+      }
+
       if (item.isFolder) {
         final srcDir = Directory(item.id);
         final dstDir = Directory(newPath);
         if (await srcDir.exists()) {
+          if (overwrite && await dstDir.exists() && dstDir.path.toLowerCase() != srcDir.path.toLowerCase()) {
+            await dstDir.delete(recursive: true);
+          }
           await _copyDirectory(srcDir, dstDir);
           return true;
         }
       } else {
         final srcFile = File(item.id);
+        final dstFile = File(newPath);
         if (await srcFile.exists()) {
+          if (overwrite && await dstFile.exists() && dstFile.path.toLowerCase() != srcFile.path.toLowerCase()) {
+            await dstFile.delete();
+          }
           await srcFile.copy(newPath);
           return true;
         }
@@ -473,6 +512,36 @@ class LocalDiskService extends CloudService {
       debugPrint('[LocalDiskService] 복사 실패: $e');
     }
     return false;
+  }
+
+  String _getUniqueNameForDisk(String folder, String name, bool isFolder) {
+    String baseName;
+    String extension;
+
+    if (!isFolder && name.contains('.') && name.lastIndexOf('.') > 0) {
+      final dotIndex = name.lastIndexOf('.');
+      baseName = name.substring(0, dotIndex);
+      extension = name.substring(dotIndex);
+    } else {
+      baseName = name;
+      extension = '';
+    }
+
+    String candidate = '$baseName - 복사본$extension';
+    var path = '$folder${Platform.pathSeparator}$candidate';
+    if (!(isFolder ? Directory(path).existsSync() : File(path).existsSync())) {
+      return candidate;
+    }
+
+    int counter = 2;
+    while (true) {
+      candidate = '$baseName - 복사본 ($counter)$extension';
+      path = '$folder${Platform.pathSeparator}$candidate';
+      if (!(isFolder ? Directory(path).existsSync() : File(path).existsSync())) {
+        return candidate;
+      }
+      counter++;
+    }
   }
 
   Future<void> _copyDirectory(Directory src, Directory dst) async {
