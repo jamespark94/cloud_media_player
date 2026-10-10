@@ -66,10 +66,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   // 하드웨어 가속 상태 관리
   bool _isHwDec = true;
 
-  // 제스처 기반 화면 밝기 및 볼륨 조절 상태
-  double _brightness = 0.5;
+  // 제스처 기반 비디오 콘트라스트(명암비) 및 볼륨 조절 상태
+  double _contrast = 1.0;
   double _gestureVolume = 100.0;
-  bool _showBrightnessIndicator = false;
+  bool _showContrastIndicator = false;
   bool _showVolumeIndicator = false;
   Timer? _gestureIndicatorTimer;
   bool _isDraggingLeft = false;
@@ -204,7 +204,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     });
 
     _initAudioSession();
-    _initBrightness();
+    _initContrast();
     _initVolume();
     SubtitleSettingsService.instance.init();
     _initAndPlay();
@@ -1265,42 +1265,49 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     );
   }
 
-  /// 화면 밝기 초기화 (저장된 밝기 유지 또는 시스템/앱 현재 밝기 읽기)
-  Future<void> _initBrightness() async {
+  /// 비디오 콘트라스트(대비) 초기화 (저장된 값 복원, 기본 1.0 = 100%)
+  Future<void> _initContrast() async {
     try {
       final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getDouble('player_saved_brightness');
+      final saved = prefs.getDouble('player_saved_contrast');
       if (saved != null) {
-        _brightness = saved.clamp(0.01, 1.0);
+        _contrast = saved.clamp(0.4, 2.0);
       } else {
-        final b = await ScreenBrightness().application;
-        _brightness = b.clamp(0.01, 1.0);
+        _contrast = 1.0;
       }
       if (mounted) {
         setState(() {});
       }
-      await ScreenBrightness().setApplicationScreenBrightness(_brightness);
     } catch (_) {
-      _brightness = 0.5;
+      _contrast = 1.0;
     }
   }
 
-  /// 제스처에 의한 화면 밝기 변경 (0.01 ~ 1.0) 및 영구 저장 (플레이 중지 후 재시작 시 유지)
-  Future<void> _setBrightness(double value) async {
-    final clamped = value.clamp(0.01, 1.0);
+  /// 제스처에 의한 비디오 콘트라스트 변경 (0.4 ~ 2.0, 1.0 = 표준 100%) 및 저장
+  Future<void> _setContrast(double value) async {
+    final clamped = value.clamp(0.4, 2.0);
     setState(() {
-      _brightness = clamped;
-      _showBrightnessIndicator = true;
+      _contrast = clamped;
+      _showContrastIndicator = true;
       _showVolumeIndicator = false;
     });
     try {
-      await ScreenBrightness().setApplicationScreenBrightness(clamped);
-    } catch (_) {}
-    try {
       final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble('player_saved_brightness', clamped);
+      await prefs.setDouble('player_saved_contrast', clamped);
     } catch (_) {}
     _startGestureDismissTimer();
+  }
+
+  /// 4x5 색상 매트릭스 계산 (블랙이 뜨지 않고 명암비만 깔끔하게 조절)
+  List<double> _getContrastMatrix(double contrast) {
+    final c = contrast;
+    final offset = 128.0 * (1.0 - c);
+    return <double>[
+      c, 0, 0, 0, offset,
+      0, c, 0, 0, offset,
+      0, 0, c, 0, offset,
+      0, 0, 0, 1, 0,
+    ];
   }
 
   /// 시스템 볼륨 초기화 및 기기 볼륨 리스너 등록
@@ -1339,7 +1346,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     setState(() {
       _gestureVolume = clamped;
       _showVolumeIndicator = true;
-      _showBrightnessIndicator = false;
+      _showContrastIndicator = false;
     });
     try {
       await FlutterVolumeController.setVolume(clamped / 100.0);
@@ -1356,7 +1363,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _gestureIndicatorTimer = Timer(const Duration(milliseconds: 1200), () {
       if (mounted) {
         setState(() {
-          _showBrightnessIndicator = false;
+          _showContrastIndicator = false;
           _showVolumeIndicator = false;
         });
       }
@@ -1481,9 +1488,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 final delta = -details.primaryDelta! / (size.height * 0.75);
 
                 if (_isDraggingLeft) {
-                  // 화면 왼쪽: 밝기 조절 (0.01 ~ 1.0)
-                  final newB = (_brightness + delta).clamp(0.01, 1.0);
-                  _setBrightness(newB);
+                  // 화면 왼쪽: 비디오 콘트라스트(명암비) 조절 (0.4 ~ 2.0, 기본 1.0)
+                  final newC = (_contrast + delta).clamp(0.4, 2.0);
+                  _setContrast(newC);
                 } else if (_isDraggingRight) {
                   // 화면 오른쪽: 시스템 볼륨 조절 (0.0 ~ 100.0)
                   final newV = (_gestureVolume + delta * 100).clamp(0.0, 100.0);
@@ -1503,29 +1510,26 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               behavior: HitTestBehavior.opaque,
               child: Stack(
                 children: [
-                  // 1. 비디오 화면 렌더링
+                  // 1. 비디오 화면 렌더링 (콘트라스트 실시간 ColorFilter 적용)
                   Center(
-                    child: Video(
-                      controller: _controller,
-                      controls: NoVideoControls,
-                      subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
-                    ),
+                    child: _contrast == 1.0
+                        ? Video(
+                            controller: _controller,
+                            controls: NoVideoControls,
+                            subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
+                          )
+                        : ColorFiltered(
+                            colorFilter: ColorFilter.matrix(_getContrastMatrix(_contrast)),
+                            child: Video(
+                              controller: _controller,
+                              controls: NoVideoControls,
+                              subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
+                            ),
+                          ),
                   ),
 
                   // 1-1. 커스텀 자막 오버레이 (크기, 위치, 글자색, 배경색 & 투명도 완벽 지원)
                   CustomSubtitleView(player: _player),
-
-                  // 1-2. 소프트웨어 밝기 필터 오버레이 (하드웨어 백라이트 보완 및 데스크톱 지원)
-                  if (_brightness < 1.0)
-                    Positioned.fill(
-                      child: IgnorePointer(
-                        child: Container(
-                          color: Colors.black.withValues(
-                            alpha: (1.0 - _brightness).clamp(0.0, 0.75),
-                          ),
-                        ),
-                      ),
-                    ),
 
                   // 2. 로딩 인디케이터
                   if (_isLoading)
@@ -1638,28 +1642,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   );
 }
 
-  /// 화면 왼쪽(밝기) 및 오른쪽(볼륨) 제스처 조절 시 표시되는 세로형 피드백 인디케이터
+  /// 화면 왼쪽(콘트라스트) 및 오른쪽(볼륨) 제스처 조절 시 표시되는 세로형 피드백 인디케이터
   Widget _buildGestureIndicators() {
     return Positioned.fill(
       child: IgnorePointer(
         child: Stack(
           children: [
-            // 좌측 밝기 인디케이터
-            if (_showBrightnessIndicator)
+            // 좌측 콘트라스트(대비) 인디케이터
+            if (_showContrastIndicator)
               Positioned(
                 left: 36,
                 top: 0,
                 bottom: 0,
                 child: Center(
                   child: _buildVerticalIndicator(
-                    icon: _brightness < 0.33
-                        ? Icons.brightness_low
-                        : (_brightness < 0.66
-                            ? Icons.brightness_medium
-                            : Icons.brightness_high),
+                    icon: Icons.contrast,
                     iconColor: Colors.amberAccent,
-                    percent: _brightness,
-                    label: '${(_brightness * 100).round()}%',
+                    percent: (_contrast / 2.0).clamp(0.0, 1.0),
+                    label: '${(_contrast * 100).round()}%',
                   ),
                 ),
               ),
