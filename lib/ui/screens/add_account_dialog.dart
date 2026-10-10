@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
 import '../../models/cloud_account.dart';
 import '../../services/account_manager.dart';
@@ -95,6 +96,15 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         setState(() => _showManualInput = true);
       }
     });
+
+    if ((_selectedType == CloudType.box || _selectedType == CloudType.dropbox) &&
+        _clientIdController.text.trim().isEmpty) {
+      setState(() {
+        final name = _selectedType == CloudType.box ? 'Box' : 'Dropbox';
+        _errorMessage = '$name 서비스는 보안 정책상 타사 공용 키가 차단되어 있습니다.\n아래 [API 키 설정]에 본인의 개발자 App Key를 입력해 주세요.';
+      });
+      return;
+    }
 
     setState(() {
       _isLoading = true;
@@ -786,39 +796,125 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
               const SizedBox(height: 12),
             ],
 
-            // 커스텀 API 키 (BYOK) 설정
-            ExpansionTile(
-              initiallyExpanded: type == CloudType.box || type == CloudType.dropbox,
-              title: const Text('커스텀 API 키 설정 (선택 사항)',
-                  style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
-              subtitle: Text(
-                type == CloudType.box
-                    ? '기본 키 인증 오류 시 Box Developer Console의 App Key 입력'
-                    : type == CloudType.dropbox
-                        ? '기본 키 인증 오류 시 Dropbox App Console의 App Key/Secret 입력'
-                        : '본인만의 Client ID/Secret이 있는 경우 입력',
-                style: const TextStyle(fontSize: 11, color: Colors.grey),
+            // Box / Dropbox 전용 필수 API Key 안내 및 입력
+            if (type == CloudType.box || type == CloudType.dropbox) ...[
+              Container(
+                padding: const EdgeInsets.all(14),
+                decoration: BoxDecoration(
+                  color: (type == CloudType.box ? Colors.blue : Colors.indigo).withAlpha(25),
+                  borderRadius: BorderRadius.circular(10),
+                  border: Border.all(color: (type == CloudType.box ? Colors.blue : Colors.indigo).withAlpha(80)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
+                      children: [
+                        Icon(Icons.vpn_key_outlined, size: 18, color: type == CloudType.box ? Colors.blueAccent : Colors.indigoAccent),
+                        const SizedBox(width: 8),
+                        Text(
+                          type == CloudType.box ? 'Box 무료 App Key 등록 안내' : 'Dropbox 무료 App Key 등록 안내',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                        ),
+                      ],
+                    ),
+                    const SizedBox(height: 6),
+                    Text(
+                      type == CloudType.box
+                          ? 'Box는 타사 공용 키를 엄격히 차단하므로, Box Developer Console(developer.box.com)에서 생성한 본인의 Custom App 키가 필요합니다.\n\n'
+                            '1. developer.box.com 접속 → Custom App (OAuth 2.0)\n'
+                            '2. Redirect URI에 아래 주소 등록 후 아래에 키 입력:'
+                          : 'Dropbox는 타사 공용 키를 엄격히 차단하므로, Dropbox App Console(dropbox.com/developers/apps)에서 생성한 본인의 App 키가 필요합니다.\n\n'
+                            '1. dropbox.com/developers/apps 접속 → Create app\n'
+                            '2. Scoped access → Full Dropbox 선택\n'
+                            '3. Permissions에서 files.metadata.read, files.content.read 체크\n'
+                            '4. Redirect URI에 아래 주소 등록 후 아래에 키 입력:',
+                      style: const TextStyle(fontSize: 11, color: Colors.white70, height: 1.4),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                            decoration: BoxDecoration(
+                              color: Colors.black26,
+                              borderRadius: BorderRadius.circular(6),
+                              border: Border.all(color: Colors.white24),
+                            ),
+                            child: const SelectableText(
+                              'http://localhost:53682/',
+                              style: TextStyle(fontFamily: 'monospace', fontSize: 11),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton.icon(
+                          onPressed: () {
+                            Clipboard.setData(const ClipboardData(text: 'http://localhost:53682/'));
+                            ScaffoldMessenger.of(context).showSnackBar(
+                              const SnackBar(content: Text('Redirect URI가 클립보드에 복사되었습니다.')),
+                            );
+                          },
+                          icon: const Icon(Icons.copy, size: 14),
+                          label: const Text('복사', style: TextStyle(fontSize: 12)),
+                          style: ElevatedButton.styleFrom(
+                            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                            isDense: true,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-              children: [
-                TextField(
-                  controller: _clientIdController,
-                  decoration: InputDecoration(
-                    labelText: type == CloudType.dropbox ? 'App Key (선택)' : 'Client ID (선택)',
-                    border: const OutlineInputBorder(),
-                  ),
+              const SizedBox(height: 14),
+              TextField(
+                controller: _clientIdController,
+                decoration: InputDecoration(
+                  labelText: type == CloudType.dropbox ? 'App Key (Client ID) *' : 'Client ID *',
+                  hintText: '발급받은 Client ID 입력',
+                  border: const OutlineInputBorder(),
                 ),
-                const SizedBox(height: 12),
-                TextField(
-                  controller: _clientSecretController,
-                  obscureText: true,
-                  decoration: InputDecoration(
-                    labelText: type == CloudType.dropbox ? 'App Secret (선택)' : 'Client Secret (선택)',
-                    border: const OutlineInputBorder(),
-                  ),
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _clientSecretController,
+                obscureText: true,
+                decoration: InputDecoration(
+                  labelText: type == CloudType.dropbox ? 'App Secret (Client Secret) *' : 'Client Secret *',
+                  hintText: '발급받은 Client Secret 입력',
+                  border: const OutlineInputBorder(),
                 ),
-                const SizedBox(height: 8),
-              ],
-            ),
+              ),
+            ] else ...[
+              // 구글 드라이브 / 원드라이브는 선택적 BYOK
+              ExpansionTile(
+                title: const Text('커스텀 API 키 설정 (선택 사항)',
+                    style: TextStyle(fontSize: 14, fontWeight: FontWeight.w500)),
+                subtitle: const Text('본인만의 Client ID/Secret이 있는 경우에만 입력',
+                    style: TextStyle(fontSize: 11, color: Colors.grey)),
+                children: [
+                  TextField(
+                    controller: _clientIdController,
+                    decoration: const InputDecoration(
+                      labelText: 'Client ID (선택)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 12),
+                  TextField(
+                    controller: _clientSecretController,
+                    obscureText: true,
+                    decoration: const InputDecoration(
+                      labelText: 'Client Secret (선택)',
+                      border: OutlineInputBorder(),
+                    ),
+                  ),
+                  const SizedBox(height: 8),
+                ],
+              ),
+            ],
 
             const SizedBox(height: 16),
             SizedBox(
