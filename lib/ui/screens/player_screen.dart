@@ -1,4 +1,4 @@
-﻿import 'dart:async';
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -74,6 +74,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   Timer? _gestureIndicatorTimer;
   bool _isDraggingLeft = false;
   bool _isDraggingRight = false;
+  double? _doubleTapDownX; // 더블탭 위치(좌/우 10초 점프 판별용)
 
   // 이전 시청 시 사용한 자막 파일 및 언어 설정 기억 변수
   String? _currentSubtitleType;
@@ -592,6 +593,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     } catch (e) {
       debugPrint('[PlayerScreen] Seek 실패: $e');
     }
+  }
+
+  /// 화면 좌/우 더블탭 시 [seconds]초 만큼 상대 이동 (음수=뒤로)
+  Future<void> _doubleTapSeek(int seconds) async {
+    final current = _dragPosition ?? _player.state.position;
+    await _safeSeek(current + Duration(seconds: seconds));
+    _showNotificationBanner(
+      message: seconds < 0 ? '${-seconds}초 뒤로' : '$seconds초 앞으로',
+      icon: seconds < 0 ? Icons.replay_10 : Icons.forward_10,
+      iconColor: Colors.white,
+      duration: const Duration(milliseconds: 700),
+    );
   }
 
   void _flushPendingSeek() {
@@ -1471,7 +1484,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             },
             child: GestureDetector(
               onTap: _toggleControls,
-              onDoubleTap: _toggleFullScreen,
+              onDoubleTapDown: (details) {
+                _doubleTapDownX = details.localPosition.dx;
+              },
+              onDoubleTap: () {
+                final width = MediaQuery.of(context).size.width;
+                final x = _doubleTapDownX ?? width / 2;
+                if (x < width * 0.4) {
+                  _doubleTapSeek(-10);
+                } else if (x > width * 0.6) {
+                  _doubleTapSeek(10);
+                } else {
+                  _toggleFullScreen();
+                }
+              },
               onVerticalDragStart: (details) {
                 final size = MediaQuery.of(context).size;
                 final x = details.localPosition.dx;
