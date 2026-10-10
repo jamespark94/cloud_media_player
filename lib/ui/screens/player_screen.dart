@@ -1271,7 +1271,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       final prefs = await SharedPreferences.getInstance();
       final saved = prefs.getDouble('player_saved_contrast');
       if (saved != null) {
-        _contrast = saved.clamp(0.4, 2.0);
+        _contrast = saved.clamp(0.5, 2.0);
       } else {
         _contrast = 1.0;
       }
@@ -1283,9 +1283,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
   }
 
-  /// 제스처에 의한 비디오 콘트라스트 변경 (0.4 ~ 2.0, 1.0 = 표준 100%) 및 저장
+  /// 제스처에 의한 비디오 콘트라스트 변경 (0.5 ~ 2.0, 1.0 = 표준 100%) 및 저장
   Future<void> _setContrast(double value) async {
-    final clamped = value.clamp(0.4, 2.0);
+    final clamped = value.clamp(0.5, 2.0);
     setState(() {
       _contrast = clamped;
       _showContrastIndicator = true;
@@ -1298,14 +1298,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _startGestureDismissTimer();
   }
 
-  /// 4x5 색상 매트릭스 계산 (블랙이 뜨지 않고 명암비만 깔끔하게 조절)
+  /// 4x5 색상 매트릭스 계산 (블랙 레벨 0 고정 명암비 조절)
+  /// - 오프셋을 0으로 완벽 고정하여 수치를 올리든 내리든 순수 블랙(0)이 절대 들뜨거나 뭉개지지 않음
+  /// - 올리면(>1.0) 음수 오프셋으로 인한 어두워짐 없이 명암비와 하이라이트가 시원하게 살아남
+  /// - 내리면(<1.0) 양수 오프셋으로 인한 블랙 들뜸 없이 눈부심이 편안하고 차분해짐
   List<double> _getContrastMatrix(double contrast) {
     final c = contrast;
-    final offset = 128.0 * (1.0 - c);
     return <double>[
-      c, 0, 0, 0, offset,
-      0, c, 0, 0, offset,
-      0, 0, c, 0, offset,
+      c, 0, 0, 0, 0,
+      0, c, 0, 0, 0,
+      0, 0, c, 0, 0,
       0, 0, 0, 1, 0,
     ];
   }
@@ -1488,8 +1490,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 final delta = -details.primaryDelta! / (size.height * 0.75);
 
                 if (_isDraggingLeft) {
-                  // 화면 왼쪽: 비디오 콘트라스트(명암비) 조절 (0.4 ~ 2.0, 기본 1.0)
-                  final newC = (_contrast + delta).clamp(0.4, 2.0);
+                  // 화면 왼쪽: 비디오 콘트라스트(명암비) 조절 (0.5 ~ 2.0, 기본 1.0)
+                  final newC = (_contrast + delta).clamp(0.5, 2.0);
                   _setContrast(newC);
                 } else if (_isDraggingRight) {
                   // 화면 오른쪽: 시스템 볼륨 조절 (0.0 ~ 100.0)
