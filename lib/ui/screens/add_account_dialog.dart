@@ -860,7 +860,7 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                           label: const Text('복사', style: TextStyle(fontSize: 12)),
                           style: ElevatedButton.styleFrom(
                             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                            isDense: true,
+                            visualDensity: VisualDensity.compact,
                           ),
                         ),
                       ],
