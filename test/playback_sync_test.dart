@@ -103,5 +103,68 @@ void main() {
       );
       expect(pos, const Duration(milliseconds: 75000));
     });
+
+    test('removeRecord records tombstone and prevents zombie record resurrection', () async {
+      final service = PlaybackHistoryService.instance;
+
+      final testRecord = PlaybackRecord(
+        itemId: 'video_to_delete',
+        accountId: 'acc_1',
+        fileName: 'zombie_candidate.mp4',
+        positionMillis: 50000,
+        durationMillis: 100000,
+        lastUpdated: 1000,
+      );
+
+      // 1. 처음엔 로컬에 저장
+      await service.mergeWithRemote([testRecord]);
+      var all = await service.getAllRecords();
+      expect(all.any((r) => r.itemId == 'video_to_delete'), isTrue);
+
+      // 2. 사용자가 삭제 (Tombstone 생성)
+      await service.removeRecord(
+        accountId: 'acc_1',
+        itemId: 'video_to_delete',
+        fileName: 'zombie_candidate.mp4',
+      );
+      all = await service.getAllRecords();
+      expect(all.any((r) => r.itemId == 'video_to_delete'), isFalse);
+
+      final deleted = await service.getDeletedRecords();
+      expect(deleted.containsKey('video_to_delete'), isTrue);
+
+      // 3. 클라우드에서 이전 원격 레코드(lastUpdated: 1000)가 다시 동기화 시도되어도 부활하지 않아야 함
+      await service.mergeWithRemote([testRecord]);
+      all = await service.getAllRecords();
+      expect(all.any((r) => r.itemId == 'video_to_delete'), isFalse); // 좀비 부활 방지 성공!
+    });
+
+    test('remote deletion syncs to local device and removes local record', () async {
+      final service = PlaybackHistoryService.instance;
+
+      final localRecord = PlaybackRecord(
+        itemId: 'video_device_b',
+        accountId: 'acc_device_b',
+        fileName: 'remote_deleted_movie.mp4',
+        positionMillis: 20000,
+        durationMillis: 80000,
+        lastUpdated: 1000,
+      );
+
+      // 기기 B 로컬에 존재
+      await service.mergeWithRemote([localRecord]);
+      var all = await service.getAllRecords();
+      expect(all.any((r) => r.itemId == 'video_device_b'), isTrue);
+
+      // 타 기기(기기 A)에서 방금 삭제되었다는 tombstone 정보 수신 (deletedAt: now > lastUpdated: 1000)
+      final now = DateTime.now().millisecondsSinceEpoch;
+      await service.mergeWithRemote(
+        [],
+        remoteDeletedRecords: {'video_device_b': now},
+      );
+
+      all = await service.getAllRecords();
+      expect(all.any((r) => r.itemId == 'video_device_b'), isFalse); // 기기 B에서도 정상 삭제됨!
+    });
   });
 }

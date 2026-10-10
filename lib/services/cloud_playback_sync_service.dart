@@ -70,31 +70,41 @@ class CloudPlaybackSyncService extends ChangeNotifier {
         // 1. 원격 히스토리 파일 가져오기
         final remoteJsonStr = await _fetchRemoteHistoryJson(service, account);
         List<PlaybackRecord> remoteRecords = [];
+        Map<String, int> remoteDeleted = {};
 
         if (remoteJsonStr != null && remoteJsonStr.isNotEmpty) {
           try {
             final data = jsonDecode(remoteJsonStr);
             final List<dynamic> list = data is Map ? (data['histories'] as List<dynamic>? ?? []) : (data as List<dynamic>);
             remoteRecords = list.map((e) => PlaybackRecord.fromJson(e as Map<String, dynamic>)).toList();
-            debugPrint('[PlaybackSync] 원격 재생기록 ${remoteRecords.length}개 로드 완료 (${account.name})');
+            if (data is Map && data['deletedRecords'] is Map) {
+              final dMap = data['deletedRecords'] as Map<String, dynamic>;
+              remoteDeleted = dMap.map((k, v) => MapEntry(k, (v as num).toInt()));
+            }
+            debugPrint('[PlaybackSync] 원격 재생기록 ${remoteRecords.length}개, 삭제기록 ${remoteDeleted.length}개 로드 완료 (${account.name})');
           } catch (e) {
             debugPrint('[PlaybackSync] 원격 JSON 파싱 실패: $e');
           }
         }
 
-        // 2. 로컬 히스토리와 스마트 병합
-        final mergedList = await PlaybackHistoryService.instance.mergeWithRemote(remoteRecords);
+        // 2. 로컬 히스토리와 스마트 병합 (삭제 툼스톤 양방향 반영)
+        final mergedList = await PlaybackHistoryService.instance.mergeWithRemote(
+          remoteRecords,
+          remoteDeletedRecords: remoteDeleted,
+        );
         mergedCount = mergedList.length;
 
-        // 3. 최신 병합본을 원격 클라우드 루트에 업로드
+        // 3. 최신 병합본 및 삭제 목록을 원격 클라우드 루트에 업로드
         final allRecords = await PlaybackHistoryService.instance.getAllRecords();
+        final localDeleted = await PlaybackHistoryService.instance.getDeletedRecords();
         final syncData = {
           'app': 'cloud_media_player',
-          'version': 1,
+          'version': 2,
           'device': defaultTargetPlatform.name,
           'updatedAt': DateTime.now().toUtc().toIso8601String(),
           'count': allRecords.length,
           'histories': allRecords.map((e) => e.toJson()).toList(),
+          'deletedRecords': localDeleted,
         };
         final payload = jsonEncode(syncData);
         final uploadResult = await _uploadRemoteHistoryJson(service, account, payload);

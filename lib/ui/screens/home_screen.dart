@@ -36,19 +36,44 @@ class HomeScreen extends StatefulWidget {
   State<HomeScreen> createState() => _HomeScreenState();
 }
 
-class _HomeScreenState extends State<HomeScreen> {
+class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
   static const String _prefViewModeKey = 'home_explorer_view_mode';
   HomeViewMode _viewMode = HomeViewMode.details;
   bool _showAllHistory = false;
   final Set<String> _prefetchedThumbnailKeys = {};
+  DateTime? _backgroundEnteredTime;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _loadViewMode();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       _silentSyncWithCloud();
     });
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.paused) {
+      _backgroundEnteredTime = DateTime.now();
+    } else if (state == AppLifecycleState.resumed) {
+      if (_backgroundEnteredTime != null) {
+        final elapsed = DateTime.now().difference(_backgroundEnteredTime!);
+        // 백그라운드에 1분(60초) 이상 머물다가 포그라운드로 복귀한 경우 자동 동기화 1회 실행
+        if (elapsed >= const Duration(seconds: 60)) {
+          debugPrint('[HomeScreen] 백그라운드 복귀 (${elapsed.inSeconds}초 경과) -> 플레이리스트 자동 동기화');
+          _silentSyncWithCloud();
+        }
+        _backgroundEnteredTime = null;
+      }
+    }
   }
 
   Future<void> _silentSyncWithCloud() async {
@@ -2063,7 +2088,12 @@ class _HomeScreenState extends State<HomeScreen> {
     PlaybackHistoryService.instance.removeRecord(
       accountId: record.accountId,
       itemId: record.itemId,
+      fileName: record.fileName,
     );
+    // 삭제 상태를 클라우드 서버에도 즉시 반영 (좀비 레코드 부활 방지 및 타 기기 동기화)
+    final accountMgr = context.read<AccountManager>();
+    CloudPlaybackSyncService.instance.scheduleAutoPush(accountMgr);
+
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
         content: Text('\'${record.fileName}\' 기록이 삭제되었습니다.'),
@@ -2087,6 +2117,9 @@ class _HomeScreenState extends State<HomeScreen> {
             style: ElevatedButton.styleFrom(backgroundColor: Colors.redAccent),
             onPressed: () {
               PlaybackHistoryService.instance.clearAllHistory();
+              // 전체 삭제 상태를 클라우드 서버에도 즉시 반영
+              final accountMgr = context.read<AccountManager>();
+              CloudPlaybackSyncService.instance.scheduleAutoPush(accountMgr);
               Navigator.pop(context);
             },
             child: const Text('삭제', style: TextStyle(color: Colors.white)),

@@ -134,9 +134,43 @@ class PlaybackHistoryService extends ChangeNotifier {
   PlaybackHistoryService._internal();
 
   static const String _storageKey = 'cloud_media_playback_history';
+  static const String _deletedStorageKey = 'cloud_media_playback_deleted_records';
   Map<String, PlaybackRecord>? _cache;
+  Map<String, int>? _deletedCache;
 
   String _generateKey(String accountId, String itemId) => '${accountId}_$itemId';
+
+  Future<Map<String, int>> getDeletedRecords() async {
+    if (_deletedCache != null) return _deletedCache!;
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final jsonStr = prefs.getString(_deletedStorageKey);
+      if (jsonStr != null && jsonStr.isNotEmpty) {
+        final decoded = json.decode(jsonStr) as Map<String, dynamic>;
+        _deletedCache = decoded.map((k, v) => MapEntry(k, (v as num).toInt()));
+        return _deletedCache!;
+      }
+    } catch (e) {
+      debugPrint('삭제 기록 불러오기 실패: $e');
+    }
+    _deletedCache = {};
+    return _deletedCache!;
+  }
+
+  Future<void> _saveDeletedRecords() async {
+    if (_deletedCache == null) return;
+    try {
+      // 30일 경과 툼스톤 자동 가비지 컬렉션 (최대 200개 유지)
+      final now = DateTime.now().millisecondsSinceEpoch;
+      const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+      _deletedCache!.removeWhere((k, timestamp) => now - timestamp > thirtyDaysMs);
+
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(_deletedStorageKey, json.encode(_deletedCache));
+    } catch (e) {
+      debugPrint('삭제 기록 저장 실패: $e');
+    }
+  }
 
   Future<Map<String, PlaybackRecord>> _loadAll() async {
     if (_cache != null) return _cache!;
@@ -172,11 +206,50 @@ class PlaybackHistoryService extends ChangeNotifier {
     return all.values.toList();
   }
 
-  /// 원격 클라우드 재생 기록 목록과 로컬 목록을 스마트 병합
-  Future<List<PlaybackRecord>> mergeWithRemote(List<PlaybackRecord> remoteRecords) async {
+  /// 원격 클라우드 재생 기록 목록과 로컬 목록을 스마트 병합 (삭제 툼스톤 양방향 반영)
+  Future<List<PlaybackRecord>> mergeWithRemote(
+    List<PlaybackRecord> remoteRecords, {
+    Map<String, int>? remoteDeletedRecords,
+  }) async {
     final all = await _loadAll();
+    final deleted = await getDeletedRecords();
 
+    // 1. 원격 삭제 기록과 로컬 삭제 기록 병합
+    if (remoteDeletedRecords != null && remoteDeletedRecords.isNotEmpty) {
+      for (final entry in remoteDeletedRecords.entries) {
+        final existingTime = deleted[entry.key] ?? 0;
+        deleted[entry.key] = math.max(existingTime, entry.value);
+      }
+      await _saveDeletedRecords();
+    }
+
+    // 2. 로컬 레코드 중 원격에서 삭제된 것으로 판명된 항목 정리
+    final localKeysToRemove = <String>[];
+    for (final entry in all.entries) {
+      final rec = entry.value;
+      final delTime = math.max(deleted[rec.itemId] ?? 0, deleted[rec.fileName] ?? 0);
+      if (delTime > 0 && rec.lastUpdated <= delTime) {
+        localKeysToRemove.add(entry.key);
+      }
+    }
+    for (final key in localKeysToRemove) {
+      all.remove(key);
+    }
+
+    // 3. 원격 레코드 병합 (단, 삭제 목록에 등록되어 있고 삭제 이후 재생되지 않은 레코드는 무시)
     for (final remote in remoteRecords) {
+      final delTime = math.max(deleted[remote.itemId] ?? 0, deleted[remote.fileName] ?? 0);
+      if (delTime > 0 && remote.lastUpdated <= delTime) {
+        // 이미 삭제된 레코드이므로 병합하지 않고 무시 (좀비 레코드 부활 방지)
+        continue;
+      }
+
+      // 만약 삭제된 시각 이후에 새로 재생된 레코드라면 삭제 목록에서 해제
+      if (delTime > 0 && remote.lastUpdated > delTime) {
+        deleted.remove(remote.itemId);
+        deleted.remove(remote.fileName);
+      }
+
       final remoteKey = _generateKey(remote.accountId, remote.itemId);
 
       // 로컬에 기존 매칭되는 레코드가 있는지 검사 (키, itemId, fileName 기준)
@@ -237,6 +310,7 @@ class PlaybackHistoryService extends ChangeNotifier {
 
     _cache = all;
     await _saveAll();
+    await _saveDeletedRecords();
     notifyListeners();
     return getHistoryList();
   }
@@ -291,6 +365,14 @@ class PlaybackHistoryService extends ChangeNotifier {
   }) async {
     final all = await _loadAll();
     final key = _generateKey(accountId, item.id);
+
+    // 다시 재생 시작 시 해당 항목을 삭제(툼스톤) 목록에서 해제
+    final deleted = await getDeletedRecords();
+    if (deleted.containsKey(item.id) || deleted.containsKey(item.name)) {
+      deleted.remove(item.id);
+      deleted.remove(item.name);
+      await _saveDeletedRecords();
+    }
 
     final posMillis = position.inMilliseconds;
     final durMillis = totalDuration.inMilliseconds;
@@ -431,33 +513,61 @@ class PlaybackHistoryService extends ChangeNotifier {
     }
   }
 
-  /// 특정 재생 기록 삭제
+  /// 특정 재생 기록 삭제 (식별자 및 파일명 기준 툼스톤 등록)
   Future<void> removeRecord({
     required String accountId,
     required String itemId,
+    String? fileName,
   }) async {
     final all = await _loadAll();
-    final key = _generateKey(accountId, itemId);
-    if (all.containsKey(key)) {
-      final rec = all[key];
-      if (rec?.localThumbnailPath != null) {
-        try {
-          final file = File(rec!.localThumbnailPath!);
-          if (file.existsSync()) {
-            file.deleteSync();
-          }
-        } catch (_) {}
-      }
-      all.remove(key);
-      await _saveAll();
-      notifyListeners();
+    final deleted = await getDeletedRecords();
+    final now = DateTime.now().millisecondsSinceEpoch;
+
+    // 1. itemId 및 fileName 툼스톤 등록
+    deleted[itemId] = now;
+    if (fileName != null && fileName.isNotEmpty) {
+      deleted[fileName] = now;
     }
+
+    // 2. 키 직접 매칭 또는 itemId/fileName 매칭 항목 탐색 및 제거
+    final directKey = _generateKey(accountId, itemId);
+    final keysToRemove = <String>[];
+    for (final entry in all.entries) {
+      if (entry.key == directKey ||
+          entry.value.itemId == itemId ||
+          (fileName != null && entry.value.fileName == fileName)) {
+        keysToRemove.add(entry.key);
+        // 썸네일 파일 정리
+        if (entry.value.localThumbnailPath != null) {
+          try {
+            final file = File(entry.value.localThumbnailPath!);
+            if (file.existsSync()) file.deleteSync();
+          } catch (_) {}
+        }
+        if (entry.value.fileName.isNotEmpty) {
+          deleted[entry.value.fileName] = now;
+        }
+      }
+    }
+
+    for (final k in keysToRemove) {
+      all.remove(k);
+    }
+
+    await _saveAll();
+    await _saveDeletedRecords();
+    notifyListeners();
   }
 
-  /// 전체 히스토리 삭제
+  /// 전체 히스토리 삭제 (모든 현재 기록 툼스톤 등록)
   Future<void> clearAllHistory() async {
     final all = await _loadAll();
+    final deleted = await getDeletedRecords();
+    final now = DateTime.now().millisecondsSinceEpoch;
+
     for (final rec in all.values) {
+      deleted[rec.itemId] = now;
+      deleted[rec.fileName] = now;
       if (rec.localThumbnailPath != null) {
         try {
           final file = File(rec.localThumbnailPath!);
@@ -467,8 +577,10 @@ class PlaybackHistoryService extends ChangeNotifier {
         } catch (_) {}
       }
     }
+
     all.clear();
     await _saveAll();
+    await _saveDeletedRecords();
     notifyListeners();
   }
 
