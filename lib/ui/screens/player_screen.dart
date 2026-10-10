@@ -260,6 +260,37 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         if (cached.existsSync() && cached.lengthSync() > 0) {
           initialSubtitleFile = cached;
           initialSubtitleName = _currentSubtitleName;
+        } else {
+          // 타 기기에서 동기화되어 로컬 캐시가 없는 경우: 재생 시작 전 즉시 온디맨드 다운로드
+          try {
+            MediaItem? subToDownload;
+            final parentId = widget.item.parentId ?? record?.parentId;
+            if (parentId != null && parentId.isNotEmpty) {
+              final items = await widget.service.listItems(folderId: parentId);
+              subToDownload = items.cast<MediaItem?>().firstWhere(
+                (it) => it != null && it.isSubtitle && (it.id == _currentSubtitleId || (_currentSubtitleName != null && it.name == _currentSubtitleName)),
+                orElse: () => null,
+              );
+            }
+            subToDownload ??= MediaItem(
+              id: _currentSubtitleId!,
+              name: _currentSubtitleName ?? 'subtitle',
+              parentId: parentId,
+              isFolder: false,
+            );
+
+            final url = await widget.service.getStreamUrl(subToDownload);
+            final headers = await widget.service.getStreamHeaders();
+            final res = await http.get(Uri.parse(url), headers: headers);
+            if (res.statusCode == 200) {
+              await cached.writeAsBytes(res.bodyBytes);
+              initialSubtitleFile = cached;
+              initialSubtitleName = _currentSubtitleName ?? subToDownload.name;
+              _currentSubtitleId = subToDownload.id;
+            }
+          } catch (e) {
+            debugPrint('클라우드 자막 온디맨드 다운로드 실패: $e');
+          }
         }
       } else if (_currentSubtitleType == 'local' && _currentSubtitleId != null) {
         final local = File(_currentSubtitleId!);
@@ -322,15 +353,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       // 5. 다운로드 완료된 외부 자막이 있으면 즉시 단 1회만 연결
       if (initialSubtitleFile != null && initialSubtitleFile.existsSync()) {
         await _player.setSubtitleTrack(
-          SubtitleTrack.uri(initialSubtitleFile.path, title: initialSubtitleName, language: 'ko'),
+          SubtitleTrack.uri(initialSubtitleFile.path, title: initialSubtitleName, language: _currentSubtitleLanguage ?? 'ko'),
         );
         _hasAutoSelectedSubtitle = true;
         _saveCurrentPosition();
         if (mounted && initialSubtitleName != null) {
+          final isRestored = _currentSubtitleType != null;
           _showNotificationBanner(
-            message: '한국어 자막 자동 적용: $initialSubtitleName',
+            message: isRestored ? '이전 자막 설정 복원: $initialSubtitleName' : '한국어 자막 자동 적용: $initialSubtitleName',
             icon: Icons.subtitles,
-            iconColor: Colors.amber,
+            iconColor: isRestored ? Colors.blueAccent : Colors.amber,
             duration: const Duration(seconds: 3),
           );
         }
@@ -711,13 +743,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
     try {
       final items = await widget.service.listItems(folderId: parentId);
-      final subItem = items.firstWhere(
-        (it) => it.isSubtitle && (it.id == cloudId || (cloudName != null && it.name == cloudName)),
-        orElse: () => items.firstWhere(
-          (it) => it.isSubtitle && SubtitleUtils.isSubtitleForVideo(it.name, widget.item.name),
-          orElse: () => MediaItem(id: '', name: '', isFolder: false),
-        ),
+      MediaItem? subItem = items.cast<MediaItem?>().firstWhere(
+        (it) => it != null && it.isSubtitle && (it.id == cloudId || (cloudName != null && it.name == cloudName)),
+        orElse: () => null,
       );
+      subItem ??= items.cast<MediaItem?>().firstWhere(
+        (it) => it != null && it.isSubtitle && SubtitleUtils.isSubtitleForVideo(it.name, widget.item.name),
+        orElse: () => null,
+      );
+      subItem ??= MediaItem(id: cloudId, name: cloudName ?? 'subtitle', parentId: parentId, isFolder: false);
 
       if (subItem.id.isNotEmpty) {
         final url = await widget.service.getStreamUrl(subItem);

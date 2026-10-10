@@ -177,15 +177,33 @@ class PlaybackHistoryService extends ChangeNotifier {
     final all = await _loadAll();
 
     for (final remote in remoteRecords) {
-      final key = _generateKey(remote.accountId, remote.itemId);
-      final existing = all[key] ?? all.values.cast<PlaybackRecord?>().firstWhere(
-        (r) => r?.fileName == remote.fileName,
-        orElse: () => null,
-      );
+      final remoteKey = _generateKey(remote.accountId, remote.itemId);
+
+      // 로컬에 기존 매칭되는 레코드가 있는지 검사 (키, itemId, fileName 기준)
+      String? matchedOldKey;
+      PlaybackRecord? existing;
+
+      if (all.containsKey(remoteKey)) {
+        matchedOldKey = remoteKey;
+        existing = all[remoteKey];
+      } else {
+        for (final entry in all.entries) {
+          if (entry.value.itemId == remote.itemId || entry.value.fileName == remote.fileName) {
+            matchedOldKey = entry.key;
+            existing = entry.value;
+            break;
+          }
+        }
+      }
 
       if (existing == null) {
-        all[key] = remote;
+        all[remoteKey] = remote;
       } else {
+        // 기존 레코드가 remoteKey와 다른 키에 있었다면 구버전 중복 키 정리
+        if (matchedOldKey != null && matchedOldKey != remoteKey) {
+          all.remove(matchedOldKey);
+        }
+
         final bool remoteIsNewer = remote.lastUpdated > existing.lastUpdated;
         final newerRecord = remoteIsNewer ? remote : existing;
         final olderRecord = remoteIsNewer ? existing : remote;
@@ -211,7 +229,9 @@ class PlaybackHistoryService extends ChangeNotifier {
           thumbnailUrl: existing.thumbnailUrl ?? remote.thumbnailUrl,
           localThumbnailPath: existing.localThumbnailPath ?? remote.localThumbnailPath,
         );
-        all[key] = merged;
+
+        final targetKey = _generateKey(merged.accountId, merged.itemId);
+        all[targetKey] = merged;
       }
     }
 
@@ -238,18 +258,7 @@ class PlaybackHistoryService extends ChangeNotifier {
     required String accountId,
     required MediaItem item,
   }) async {
-    final all = await _loadAll();
-    final key = _generateKey(accountId, item.id);
-
-    // 1. accountId + itemId 기준 조회
-    var record = all[key];
-
-    // 2. 파일 이름 기준 폴백 조회
-    record ??= all.values.cast<PlaybackRecord?>().firstWhere(
-      (r) => r?.accountId == accountId && r?.fileName == item.name,
-      orElse: () => null,
-    );
-
+    final record = await getRecord(accountId: accountId, item: item);
     if (record == null) return null;
 
     final posMillis = record.positionMillis;
@@ -286,8 +295,17 @@ class PlaybackHistoryService extends ChangeNotifier {
     final posMillis = position.inMilliseconds;
     final durMillis = totalDuration.inMilliseconds;
 
-    // 이전 자막, 썸네일 및 메타 설정 유지
-    final existing = all[key];
+    // 이전 자막, 썸네일 및 메타 설정 유지 (타 기기에서 동기화된 키가 있다면 정리 후 메타데이터 계승)
+    PlaybackRecord? existing = all[key];
+    if (existing == null) {
+      for (final entry in all.entries.toList()) {
+        if (entry.value.itemId == item.id || entry.value.fileName == item.name) {
+          existing = entry.value;
+          all.remove(entry.key);
+          break;
+        }
+      }
+    }
     final subType = subtitleType ?? existing?.subtitleType;
     final subId = subtitleId ?? existing?.subtitleId;
     final subName = subtitleName ?? existing?.subtitleName;
@@ -527,16 +545,32 @@ class PlaybackHistoryService extends ChangeNotifier {
   }
 
   /// 특정 미디어의 재생 기록 객체를 반환 (UI 프로그레스 바 및 자막 복원용)
+  /// 타 기기에서 동기화되어 accountId가 다르거나 키가 일치하지 않더라도
+  /// 1. 직접 키 2. itemId 3. 최신 fileName 순으로 완벽하게 매칭합니다.
   Future<PlaybackRecord?> getRecord({
     required String accountId,
     required MediaItem item,
   }) async {
     final all = await _loadAll();
-    final key = _generateKey(accountId, item.id);
-    if (all.containsKey(key)) return all[key];
-    return all.values.cast<PlaybackRecord?>().firstWhere(
-      (r) => r?.accountId == accountId && r?.fileName == item.name,
+
+    // 1. 현재 accountId + itemId 직접 매칭
+    final directKey = _generateKey(accountId, item.id);
+    if (all.containsKey(directKey)) return all[directKey];
+
+    // 2. itemId 기준 매칭 (타 기기에서 계정 ID 접두사만 다르고 파일 ID는 동일한 경우)
+    final byItemId = all.values.cast<PlaybackRecord?>().firstWhere(
+      (r) => r?.itemId == item.id,
       orElse: () => null,
     );
+    if (byItemId != null) return byItemId;
+
+    // 3. 파일 이름 기준 매칭 (타 기기 동기화 또는 폴백) - 가장 최근 시청 기록 우선
+    final matchingByName = all.values.where((r) => r.fileName == item.name).toList();
+    if (matchingByName.isNotEmpty) {
+      matchingByName.sort((a, b) => b.lastUpdated.compareTo(a.lastUpdated));
+      return matchingByName.first;
+    }
+
+    return null;
   }
 }
