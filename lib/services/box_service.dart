@@ -9,9 +9,9 @@ class BoxService extends CloudService {
   BoxService(super.account, {super.onAccountUpdated});
 
   // Box OAuth 기본 Public Client ID (BYOK 지원)
-  static const String defaultClientId = 'p433z8pvh9k0j7t0n0wfxm99n57xvhpt';
-  static const String authEndpoint = 'https://account.box.com/api/oauth2/authorize';
-  static const String tokenEndpoint = 'https://api.box.com/oauth2/token';
+  static const String defaultClientId = 'd0374ba6pgmaguie02ge15sv1mllndho';
+  static const String authEndpoint = 'https://app.box.com/api/oauth2/authorize';
+  static const String tokenEndpoint = 'https://app.box.com/api/oauth2/token';
 
   String get activeClientId => account.customClientId?.isNotEmpty == true
       ? account.customClientId!

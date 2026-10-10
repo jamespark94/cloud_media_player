@@ -8,7 +8,7 @@ class DropboxService extends CloudService {
   DropboxService(super.account, {super.onAccountUpdated});
 
   // Dropbox OAuth 기본 Public Client ID (BYOK 지원)
-  static const String defaultClientId = 'kxg4l42o7z7d0z4';
+  static const String defaultClientId = '5jcck7diasz0rqy';
   static const String authEndpoint = 'https://www.dropbox.com/oauth2/authorize';
   static const String tokenEndpoint = 'https://api.dropboxapi.com/oauth2/token';
 
