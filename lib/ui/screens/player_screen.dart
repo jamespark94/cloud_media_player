@@ -6,7 +6,6 @@ import 'package:http/http.dart' as http;
 import 'package:audio_session/audio_session.dart';
 import 'package:screen_brightness/screen_brightness.dart';
 import 'package:flutter_volume_controller/flutter_volume_controller.dart';
-import 'package:shared_preferences/shared_preferences.dart';
 import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
@@ -47,7 +46,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   double _playbackSpeed = 1.0;
   Duration _totalDuration = Duration.zero;
   Duration? _dragPosition;
-  bool _isFullScreen = false;
+  bool _isFullScreen = !Platform.isWindows && !Platform.isLinux && !Platform.isMacOS;
 
   StreamSubscription? _autoPlaySub;
   StreamSubscription? _tracksSub;
@@ -56,6 +55,19 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   Timer? _positionSaveTimer;
   bool _hasAutoSelectedSubtitle = false;
   bool _hasResumed = false;
+
+  // 재생/일시정지 즉각 반응용 낙관적 상태
+  bool? _optimisticPlaying;
+  Timer? _optimisticTimer;
+  StreamSubscription? _optimisticClearSub;
+
+  // 이전 재생 위치 이동 안내 상태
+  Duration? _resumeSeekTarget;
+  StreamSubscription? _resumeSeekSub;
+  Timer? _resumeSeekTimeout;
+
+  // 비디오 위젯 상태 보존용 키 (필터 래퍼 토글 시 재생성 방지)
+  final GlobalKey _videoKey = GlobalKey();
 
   // 오디오 포커스 세션 관리 (유튜브 등 타 앱 오디오 제어)
   AudioSession? _audioSession;
@@ -191,6 +203,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       _saveCurrentPosition();
     });
 
+    _optimisticClearSub = _player.stream.playing.listen((_) {
+      if (mounted && _optimisticPlaying != null) {
+        setState(() => _optimisticPlaying = null);
+      }
+    });
+
     // 재생 상태 감지: 재생 시 Audio Focus 획득 (유튜브 등 타 앱 자동 일시정지), 일시정지 시 포커스 해제
     _playingSub = _player.stream.playing.listen((playing) async {
       if (playing) {
@@ -208,6 +226,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _initContrast();
     _initVolume();
     SubtitleSettingsService.instance.init();
+    if (_isFullScreen) {
+      _applyMobileFullScreen(true);
+    }
     _initAndPlay();
   }
 
@@ -349,10 +370,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
       _ensureAutoPlay();
 
-      if (resumePos != null && resumePos > const Duration(seconds: 5)) {
-        _showResumeNotice(resumePos);
-      }
-
       // 5. 다운로드 완료된 외부 자막이 있으면 즉시 단 1회만 연결
       if (initialSubtitleFile != null && initialSubtitleFile.existsSync()) {
         await _player.setSubtitleTrack(
@@ -394,6 +411,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           _isLoading = false;
         });
       }
+      _beginResumeIndicator(resumePos);
       _startHideTimer();
     } catch (e) {
       // 직접 연결 오류 시 로컬 프록시로 폴백
@@ -427,10 +445,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         );
         _ensureAutoPlay();
 
-        if (resumePos != null && resumePos > const Duration(seconds: 5)) {
-          _showResumeNotice(resumePos);
-        }
-
         try {
           final d = await _player.stream.duration.firstWhere((val) => val > Duration.zero).timeout(
             const Duration(seconds: 3),
@@ -450,6 +464,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             _isLoading = false;
           });
         }
+        _beginResumeIndicator(resumePos);
         _startHideTimer();
         _restoreOrAutoLoadSubtitle();
       } catch (e2) {
@@ -1066,15 +1081,55 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   }
 
   void _togglePlayPause() {
-    if (_player.state.playing) {
-      _captureThumbnailIfNeeded(force: true);
+    final wasPlaying = _player.state.playing;
+    final wasCompleted = _player.state.completed;
+
+    // 즉시 반응: 아이콘을 먼저 바꾸고 플레이어 명령을 바로 전달
+    if (mounted) {
+      setState(() => _optimisticPlaying = wasCompleted ? true : !wasPlaying);
     }
-    if (_player.state.completed) {
+    if (wasCompleted) {
       _player.seek(Duration.zero);
       _player.play();
     } else {
       _player.playOrPause();
     }
+    // 실제 상태가 오지 않는 경우 대비 안전장치
+    _optimisticTimer?.cancel();
+    _optimisticTimer = Timer(const Duration(milliseconds: 800), () {
+      if (mounted) setState(() => _optimisticPlaying = null);
+    });
+
+    // 썸네일 캡처는 응답과 무관하게 이후에 수행
+    if (wasPlaying) {
+      Future.microtask(() => _captureThumbnailIfNeeded(force: true));
+    }
+  }
+
+  /// 로딩 스피너 종료 후 이전 재생 위치로 이동 중임을 안내 (실제 재생 위치에 도달할 때까지 표시)
+  void _beginResumeIndicator(Duration? target) {
+    if (target == null || target <= const Duration(seconds: 5) || !mounted) return;
+    setState(() => _resumeSeekTarget = target);
+
+    _resumeSeekSub?.cancel();
+    _resumeSeekTimeout?.cancel();
+    void finish() {
+      _resumeSeekSub?.cancel();
+      _resumeSeekTimeout?.cancel();
+      if (mounted && _resumeSeekTarget != null) {
+        setState(() => _resumeSeekTarget = null);
+        _showResumeNotice(target);
+      }
+    }
+
+    // 목표 위치 근처에 도달하고 버퍼링이 끝나면 안내 종료
+    _resumeSeekSub = _player.stream.position.listen((pos) {
+      if (pos >= target - const Duration(seconds: 3) && !_player.state.buffering) {
+        finish();
+      }
+    });
+    // 최대 20초 후에는 안내 종료
+    _resumeSeekTimeout = Timer(const Duration(seconds: 20), finish);
   }
 
   void _cancelAutoResume() {
@@ -1244,13 +1299,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
           decoration: BoxDecoration(
-            color: isHw
-                ? Colors.teal.withValues(alpha: 0.25)
-                : Colors.orange.withValues(alpha: 0.25),
+            color: Colors.white.withValues(alpha: 0.12),
             borderRadius: BorderRadius.circular(4),
             border: Border.all(
-              color: isHw ? Colors.tealAccent : Colors.orangeAccent,
-              width: 1,
+              color: Colors.white24,
+              width: 0.8,
             ),
           ),
           child: Row(
@@ -1259,13 +1312,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               Icon(
                 isHw ? Icons.flash_on : Icons.memory,
                 size: 13,
-                color: isHw ? Colors.tealAccent : Colors.orangeAccent,
+                color: Colors.white70,
               ),
               const SizedBox(width: 3),
               Text(
                 isHw ? 'HW' : 'SW',
-                style: TextStyle(
-                  color: isHw ? Colors.tealAccent : Colors.orangeAccent,
+                style: const TextStyle(
+                  color: Colors.white70,
                   fontSize: 11,
                   fontWeight: FontWeight.bold,
                   letterSpacing: 0.5,
@@ -1278,12 +1331,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     );
   }
 
-  /// 비디오 콘트라스트 초기화 (UI 레벨 0.0~1.0 = 0~100, 기본 0.5 = 원본)
+  /// 화면 밝기 초기화 (현재 기기 화면 밝기 0.0~1.0을 그대로 사용)
+  /// (_contrast 변수는 화면 밝기 값을 의미)
   Future<void> _initContrast() async {
     try {
-      final prefs = await SharedPreferences.getInstance();
-      final saved = prefs.getDouble('player_saved_contrast_level');
-      _contrast = (saved ?? 0.5).clamp(0.0, 1.0);
+      final current = await ScreenBrightness().application;
+      _contrast = current.clamp(0.0, 1.0);
       if (mounted) {
         setState(() {});
       }
@@ -1292,7 +1345,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
   }
 
-  /// 제스처에 의한 비디오 콘트라스트 레벨 변경 (0.0 ~ 1.0 → UI 0~100) 및 저장
+  /// 제스처에 의한 기기 화면 밝기 변경 (0.0 ~ 1.0)
   Future<void> _setContrast(double value) async {
     final clamped = value.clamp(0.0, 1.0);
     setState(() {
@@ -1301,25 +1354,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       _showVolumeIndicator = false;
     });
     try {
-      final prefs = await SharedPreferences.getInstance();
-      await prefs.setDouble('player_saved_contrast_level', clamped);
+      await ScreenBrightness().setApplicationScreenBrightness(clamped);
     } catch (_) {}
     _startGestureDismissTimer();
   }
 
-  /// UI 레벨(0~1)을 실제 게인으로 변환: 0→0.2, 0.5→1.0(원본), 1.0→2.0
-  double _contrastGain(double level) {
-    return level <= 0.5 ? 0.2 + level * 1.6 : 1.0 + (level - 0.5) * 2.0;
-  }
-
-  /// 4x5 색상 매트릭스 계산 (블랙 레벨 0 고정 명암비 조절)
-  /// - 오프셋을 0으로 고정하여 블랙(0)이 들뜨거나 뭉개지지 않음
-  List<double> _getContrastMatrix(double level) {
-    final c = _contrastGain(level);
+  /// 밝기를 50% 이상 올렸을 때 적용하는 약한 콘트라스트 + 채도 보정 (쨍한 느낌)
+  /// - 중간 회색(0.5)을 기준으로 대비를 키워 블랙/화이트 끝단은 크게 손상되지 않음
+  List<double> _getBoostMatrix(double level) {
+    final t = ((level - 0.5) * 2.0).clamp(0.0, 1.0);
+    final c = 1.0 + 0.12 * t; // 콘트라스트
+    final s = 1.0 + 0.15 * t; // 채도
+    final o = 255.0 * 0.5 * (1.0 - c); // 중간값 고정 오프셋
+    const lr = 0.2126, lg = 0.7152, lb = 0.0722;
+    final ir = lr * (1 - s), ig = lg * (1 - s), ib = lb * (1 - s);
     return <double>[
-      c, 0, 0, 0, 0,
-      0, c, 0, 0, 0,
-      0, 0, c, 0, 0,
+      c * (ir + s), c * ig, c * ib, 0, o,
+      c * ir, c * (ig + s), c * ib, 0, o,
+      c * ir, c * ig, c * (ib + s), 0, o,
       0, 0, 0, 1, 0,
     ];
   }
@@ -1397,6 +1449,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _interruptionSub?.cancel();
     _becomingNoisySub?.cancel();
     _playingSub?.cancel();
+    _optimisticClearSub?.cancel();
+    _optimisticTimer?.cancel();
+    _resumeSeekSub?.cancel();
+    _resumeSeekTimeout?.cancel();
     try {
       _audioSession?.setActive(false);
     } catch (_) {}
@@ -1512,7 +1568,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               },
               onVerticalDragUpdate: (details) {
                 final size = MediaQuery.of(context).size;
-                final delta = -details.primaryDelta! / (size.height * 0.75);
+                final delta = -details.primaryDelta! / (size.height * 0.35);
 
                 if (_isDraggingLeft) {
                   // 화면 왼쪽: 비디오 콘트라스트(명암비) 조절 (UI 0~100, 기본 50)
@@ -1537,21 +1593,23 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               behavior: HitTestBehavior.opaque,
               child: Stack(
                 children: [
-                  // 1. 비디오 화면 렌더링 (콘트라스트 실시간 ColorFilter 적용)
+                  // 1. 비디오 화면 렌더링 (시스템 밝기 + 밝기를 올릴 때만 약한 콘트라스트/채도 보정)
                   Center(
-                    child: _contrast == 0.5
-                        ? Video(
-                            controller: _controller,
-                            controls: NoVideoControls,
-                            subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
-                          )
-                        : ColorFiltered(
-                            colorFilter: ColorFilter.matrix(_getContrastMatrix(_contrast)),
+                    child: _contrast > 0.55
+                        ? ColorFiltered(
+                            colorFilter: ColorFilter.matrix(_getBoostMatrix(_contrast)),
                             child: Video(
+                              key: _videoKey,
                               controller: _controller,
                               controls: NoVideoControls,
                               subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
                             ),
+                          )
+                        : Video(
+                            key: _videoKey,
+                            controller: _controller,
+                            controls: NoVideoControls,
+                            subtitleViewConfiguration: const SubtitleViewConfiguration(visible: false),
                           ),
                   ),
 
@@ -1579,6 +1637,48 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                                 color: Colors.white,
                                 fontSize: 14,
                                 fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+
+                  // 2-1. 이전 재생 위치 이동 안내 (스피너 종료 후, 실제 재생 시작 전까지)
+                  if (_resumeSeekTarget != null && !_isLoading && _errorMessage == null)
+                    Center(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 18),
+                        decoration: BoxDecoration(
+                          color: Colors.black87,
+                          borderRadius: BorderRadius.circular(16),
+                          border: Border.all(color: Colors.white24, width: 0.8),
+                        ),
+                        child: Column(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            const Icon(Icons.history, color: Colors.blueAccent, size: 30),
+                            const SizedBox(height: 10),
+                            Text(
+                              '이전 재생 위치(${_formatDuration(_resumeSeekTarget!)})로 이동 중...',
+                              style: const TextStyle(
+                                color: Colors.white,
+                                fontSize: 14,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                            const SizedBox(height: 4),
+                            const Text(
+                              '잠시만 기다려 주세요',
+                              style: TextStyle(color: Colors.white60, fontSize: 12),
+                            ),
+                            const SizedBox(height: 12),
+                            const SizedBox(
+                              width: 120,
+                              child: LinearProgressIndicator(
+                                color: Colors.blueAccent,
+                                backgroundColor: Colors.white12,
+                                minHeight: 3,
                               ),
                             ),
                           ],
@@ -1637,13 +1737,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                           ),
                           child: SafeArea(
                             child: Column(
-                              mainAxisAlignment: MainAxisAlignment.spaceBetween,
                               children: [
                                 // 상단 헤더 바
                                 _buildTopBar(),
 
-                                // 중앙 재생/일시정지 버튼
-                                _buildCenterPlayPause(),
+                                const Spacer(),
 
                                 // 하단 탐색 & 볼륨 컨트롤
                                 _buildBottomControls(),
@@ -1675,15 +1773,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       child: IgnorePointer(
         child: Stack(
           children: [
-            // 좌측 콘트라스트(대비) 인디케이터
+            // 밝기 인디케이터: 왼쪽 스와이프 → 오른쪽에 표시
             if (_showContrastIndicator)
               Positioned(
-                left: 36,
+                right: 36,
                 top: 0,
                 bottom: 0,
                 child: Center(
                   child: _buildVerticalIndicator(
-                    icon: Icons.contrast,
+                    icon: Icons.brightness_6,
                     iconColor: Colors.amberAccent,
                     percent: _contrast.clamp(0.0, 1.0),
                     label: '${(_contrast * 100).round()}',
@@ -1691,10 +1789,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 ),
               ),
 
-            // 우측 볼륨 인디케이터
+            // 볼륨 인디케이터: 오른쪽 스와이프 → 왼쪽에 표시
             if (_showVolumeIndicator)
               Positioned(
-                right: 36,
+                left: 36,
                 top: 0,
                 bottom: 0,
                 child: Center(
@@ -1922,7 +2020,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     );
   }
 
-  Widget _buildCenterPlayPause() {
+  Widget _buildCenterPlayPause({double size = 72}) {
     return StreamBuilder<bool>(
       stream: _player.stream.playing,
       initialData: _player.state.playing,
@@ -1935,9 +2033,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             final isBuffering = bufSnap.data ?? _player.state.buffering;
             if (_isLoading || isBuffering) {
               return Container(
-                width: 76,
-                height: 76,
-                padding: const EdgeInsets.all(18),
+                width: size + 16,
+                height: size + 16,
+                padding: const EdgeInsets.all(14),
                 decoration: const BoxDecoration(
                   color: Colors.black54,
                   shape: BoxShape.circle,
@@ -1948,16 +2046,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 ),
               );
             }
-            return IconButton(
-              iconSize: 72,
-              icon: Icon(
-                isPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
-                color: Colors.white.withAlpha(220),
-              ),
-              onPressed: () {
+            final showPlaying = _optimisticPlaying ?? isPlaying;
+            return GestureDetector(
+              behavior: HitTestBehavior.opaque,
+              // 손가락이 닿는 즉시 반응 (onTap의 지연 없이)
+              onTapDown: (_) {
                 _togglePlayPause();
                 _startHideTimer();
               },
+              child: Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                child: Icon(
+                  showPlaying ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                  size: size,
+                  color: Colors.white.withAlpha(220),
+                ),
+              ),
             );
           },
         );
@@ -2054,116 +2158,66 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               );
             },
           ),
-          const SizedBox(height: 4),
 
-          // 컨트롤 하단 버튼 그룹 (10초 건너뛰기, 배속, 자막, 전체화면 등)
+          // 프로그레스 바 아래: 10초 뒤로 / 재생·일시정지 / 10초 앞으로 / 배속
           Row(
-            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              Row(
-                children: [
-                  StreamBuilder<bool>(
-                    stream: _player.stream.playing,
-                    initialData: _player.state.playing,
-                    builder: (context, playSnap) {
-                      final isPlaying = playSnap.data ?? _player.state.playing;
-                      return StreamBuilder<bool>(
-                        stream: _player.stream.buffering,
-                        initialData: _player.state.buffering,
-                        builder: (context, bufSnap) {
-                          final isBuffering = bufSnap.data ?? _player.state.buffering;
-                          return IconButton(
-                            icon: isBuffering
-                                ? const SizedBox(
-                                    width: 20,
-                                    height: 20,
-                                    child: CircularProgressIndicator(
-                                      color: Colors.white,
-                                      strokeWidth: 2,
-                                    ),
-                                  )
-                                : Icon(
-                                    isPlaying ? Icons.pause : Icons.play_arrow,
-                                    color: Colors.white,
-                                  ),
-                            tooltip: isPlaying ? '일시 정지 (Space)' : '재생 (Space)',
-                            onPressed: () {
-                              _togglePlayPause();
-                              _startHideTimer();
-                            },
-                          );
-                        },
-                      );
-                    },
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.replay_10, color: Colors.white),
-                    tooltip: '10초 뒤로',
-                    onPressed: () {
-                      final target = _player.state.position - const Duration(seconds: 10);
-                      _safeSeek(target < Duration.zero ? Duration.zero : target);
-                      _startHideTimer();
-                    },
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.forward_10, color: Colors.white),
-                    tooltip: '10초 앞으로',
-                    onPressed: () {
-                      final target = _player.state.position + const Duration(seconds: 10);
-                      _safeSeek(target);
-                      _startHideTimer();
-                    },
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.subtitles, color: Colors.white70, size: 22),
-                    tooltip: '자막 설정 (SMI/SRT)',
-                    onPressed: _openSubtitleDialog,
-                  ),
-                ],
+              const SizedBox(width: 48), // 배속 버튼과의 대칭을 위한 여백
+              IconButton(
+                iconSize: 36,
+                icon: const Icon(Icons.replay_10, color: Colors.white),
+                tooltip: '10초 뒤로',
+                onPressed: () {
+                  final target = _player.state.position - const Duration(seconds: 10);
+                  _safeSeek(target < Duration.zero ? Duration.zero : target);
+                  _startHideTimer();
+                },
               ),
-              Row(
-                children: [
-                  // 배속 변경 버튼
-                  PopupMenuButton<double>(
-                    tooltip: '재생 배속',
-                    initialValue: _playbackSpeed,
-                    onSelected: (speed) {
-                      setState(() => _playbackSpeed = speed);
-                      _player.setRate(speed);
-                      _startHideTimer();
-                    },
-                    itemBuilder: (context) => [
-                      for (final s in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0])
-                        PopupMenuItem(
-                          value: s,
-                          child: Text('${s}x',
-                              style: TextStyle(
-                                  fontWeight: _playbackSpeed == s ? FontWeight.bold : FontWeight.normal)),
-                        ),
-                    ],
-                    child: Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.white38),
-                        borderRadius: BorderRadius.circular(16),
-                      ),
-                      child: Text(
-                        '${_playbackSpeed}x',
-                        style: const TextStyle(color: Colors.white, fontSize: 13),
-                      ),
+              const SizedBox(width: 16),
+              _buildCenterPlayPause(size: 56),
+              const SizedBox(width: 16),
+              IconButton(
+                iconSize: 36,
+                icon: const Icon(Icons.forward_10, color: Colors.white),
+                tooltip: '10초 앞으로',
+                onPressed: () {
+                  final target = _player.state.position + const Duration(seconds: 10);
+                  _safeSeek(target);
+                  _startHideTimer();
+                },
+              ),
+              const SizedBox(width: 8),
+              // 배속 변경 버튼
+              PopupMenuButton<double>(
+                tooltip: '재생 배속',
+                initialValue: _playbackSpeed,
+                onSelected: (speed) {
+                  setState(() => _playbackSpeed = speed);
+                  _player.setRate(speed);
+                  _startHideTimer();
+                },
+                itemBuilder: (context) => [
+                  for (final s in [0.75, 1.0, 1.25, 1.5, 1.75, 2.0])
+                    PopupMenuItem(
+                      value: s,
+                      child: Text('${s}x',
+                          style: TextStyle(
+                              fontWeight: _playbackSpeed == s ? FontWeight.bold : FontWeight.normal)),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  IconButton(
-                    icon: Icon(
-                      _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,
-                      color: Colors.white,
-                    ),
-                    tooltip: _isFullScreen ? '전체화면 종료 (ESC)' : '전체화면',
-                    onPressed: _toggleFullScreen,
-                  ),
                 ],
-              )
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.white38),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Text(
+                    '${_playbackSpeed}x',
+                    style: const TextStyle(color: Colors.white, fontSize: 13),
+                  ),
+                ),
+              ),
             ],
           ),
         ],

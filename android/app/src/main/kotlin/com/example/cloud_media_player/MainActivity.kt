@@ -100,7 +100,7 @@ class MainActivity : FlutterActivity() {
                 WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
 
             if (enable) {
-                // 상단 상태 표시줄(시간/날짜/배터리/알림) 및 하단 제스처/소프트키 바 완전 숨김
+                // 풀스크린 모드에서는 상단 상태바 및 하단 내비게이션 바 완전 숨김
                 insetsController.hide(WindowInsetsCompat.Type.systemBars())
                 @Suppress("DEPRECATION")
                 window.addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN)
