@@ -161,24 +161,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         return;
       }
 
-      // 2. SAMI/SMI 자막의 KRCC 가상 트랙이 mpv에 의해 생성되었는지 최우선 확인
-      // (SMI 파일은 SubtitleTrack.uri 등록 후 mpv가 내부 파싱을 거쳐 KRCC 트랙을 별도로 생성하므로 즉시 활성화 필수)
-      for (final track in tracks.subtitle) {
-        final title = (track.title ?? '').toLowerCase();
-        final lang = (track.language ?? '').toLowerCase();
-        if (title.contains('krcc') || lang == 'ko' || lang == 'kor') {
-          final active = _player.state.track.subtitle;
-          if (active.id != track.id) {
-            debugPrint('[PlayerScreen] 한국어/SAMI KRCC 트랙 활성화: id=${track.id}, title=${track.title}, lang=${track.language}');
-            _player.setSubtitleTrack(track);
-            _hasAutoSelectedSubtitle = true;
-            _pendingInitialSubtitleTrack = null;
-          }
-          return;
-        }
-      }
-
-      // 3. 초기 사전 다운로드된 외부 자막이 있으면 미디어 로드 완료 시점에 적용
+      // 2. 초기 사전 다운로드된 외부 자막이 있으면 미디어 트랙 준비 완료 시점에 최우선 적용
       if (_pendingInitialSubtitleTrack != null) {
         final trackToApply = _pendingInitialSubtitleTrack!;
         final active = _player.state.track.subtitle;
@@ -190,6 +173,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         _pendingInitialSubtitleTrack = null;
         _hasAutoSelectedSubtitle = true;
         return;
+      }
+
+      // 3. SAMI/SMI 자막의 KRCC 가상 트랙이 mpv에 의해 생성되었는지 확인
+      // (SMI 파일은 SubtitleTrack.uri 등록 후 mpv가 내부 파싱을 거쳐 KRCC 트랙을 별도로 생성하므로 즉시 활성화 필수)
+      for (final track in tracks.subtitle) {
+        final title = (track.title ?? '').toLowerCase();
+        final lang = (track.language ?? '').toLowerCase();
+        if (title.contains('krcc') || lang == 'ko' || lang == 'kor') {
+          final active = _player.state.track.subtitle;
+          if (active.id != track.id) {
+            debugPrint('[PlayerScreen] 한국어/SAMI KRCC 트랙 활성화: id=${track.id}, title=${track.title}, lang=${track.language}');
+            _player.setSubtitleTrack(track);
+            _hasAutoSelectedSubtitle = true;
+          }
+          return;
+        }
       }
 
       // 이미 자막 트랙이 선택되었거나 로드된 경우 중복 호출 차단 (디먹서 재시작 방지)
@@ -444,8 +443,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           language: _currentSubtitleLanguage ?? 'ko',
         );
         _pendingInitialSubtitleTrack = subTrack;
-        await _player.setSubtitleTrack(subTrack);
-        _hasAutoSelectedSubtitle = true;
         _saveCurrentPosition();
 
         if (mounted && initialSubtitleName != null) {
@@ -457,6 +454,25 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             duration: const Duration(seconds: 3),
           );
         }
+
+        final finalSubFile = initialSubtitleFile;
+        // 미디어 로드 완료 후 안전하게 자막 트랙 연결 (mpv 로딩 중 트랙 덮어씀 방지)
+        () async {
+          try {
+            await _player.stream.duration
+                .firstWhere((d) => d > Duration.zero)
+                .timeout(const Duration(seconds: 15), onTimeout: () => Duration.zero);
+          } catch (_) {}
+          if (!mounted) return;
+          if (_currentSubtitleType == 'none') return;
+          try {
+            debugPrint('[PlayerScreen] 미디어 재생 준비 완료 -> 초기 자막 트랙 설정: ${finalSubFile.path}');
+            await _player.setSubtitleTrack(subTrack);
+            _hasAutoSelectedSubtitle = true;
+          } catch (e) {
+            debugPrint('[PlayerScreen] 초기 자막 트랙 설정 오류: $e');
+          }
+        }();
       } else {
         _restoreOrAutoLoadSubtitle();
       }
@@ -754,19 +770,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   }
 
   /// 클라우드 자막 ID 및 파일명에 포함된 특수문자(|, /, \ 등)를 안전하게 치환하여 로컬 캐시 파일 반환
-  /// (mpv demuxer가 자막 포맷을 정확히 감지할 수 있도록 원본 확장자를 끝에 명확히 보장)
+  /// (안드로이드 파일명 255바이트 한도 초과(OS Error: File name too long)를 방지하기 위해 해시 기반 고유 키 사용)
   File _getSafeSubtitleCacheFile(String id, String? name) {
     final tempDir = Directory.systemTemp;
     final ext = SubtitleUtils.getExtension(name ?? id);
-    final baseWithoutExt = SubtitleUtils.getBaseName(name ?? 'subtitle');
-    final safeId = id.replaceAll(RegExp(r'[\\/|:*?"<> ]'), '_');
-    final safeBase = baseWithoutExt.replaceAll(RegExp(r'[\\/|:*?"<> ]'), '_');
+    // id와 name을 조합하여 짧은 32비트 hex 고유 해시 키 생성 (안드로이드 255바이트 한도 방지)
+    final hashKey = '${id}_${name ?? ''}'.hashCode.toUnsigned(32).toRadixString(16);
     final subDir = Directory('${tempDir.path}/subtitles');
     if (!subDir.existsSync()) {
       subDir.createSync(recursive: true);
     }
-    // 예: temp/subtitles/safeId_safeBase.smi
-    final safeFileName = ext.isNotEmpty ? '${safeId}_$safeBase$ext' : '${safeId}_$safeBase';
+    // 예: temp/subtitles/sub_a1b2c3d4.smi (mpv demuxer 포맷 감지용 확장자 유지)
+    final safeFileName = ext.isNotEmpty ? 'sub_$hashKey$ext' : 'sub_$hashKey';
     return File('${subDir.path}/$safeFileName');
   }
 
@@ -787,10 +802,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
       if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
         final bytes = res.bodyBytes;
+        final sample = String.fromCharCodes(bytes.take(200)).trim().toLowerCase();
         // HTML 에러 페이지(403, 404 등)가 200 OK로 반환되는 경우 방지
-        final sample = String.fromCharCodes(bytes.take(200)).toLowerCase();
         if (sample.contains('<!doctype html') || (sample.contains('<html') && !sample.contains('<sami'))) {
           debugPrint('[PlayerScreen] 자막 다운로드 결과가 HTML 에러 페이지입니다. 저장 생략.');
+          return null;
+        }
+        // 바이두/테라박스 API 실패 JSON 응답({"errno":...}) 방어
+        if (sample.startsWith('{') && (sample.contains('errno') || sample.contains('error'))) {
+          debugPrint('[PlayerScreen] 자막 다운로드 결과가 API 에러 JSON입니다. 저장 생략.');
           return null;
         }
 
