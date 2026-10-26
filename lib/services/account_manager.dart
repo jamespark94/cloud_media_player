@@ -8,6 +8,7 @@ import 'cloud_service_interface.dart';
 import 'dropbox_service.dart';
 import 'google_drive_service.dart';
 import 'local_disk_service.dart';
+import 'naver_box_service.dart';
 import 'onedrive_service.dart';
 import 'webdav_service.dart';
 
@@ -115,6 +116,8 @@ class AccountManager extends ChangeNotifier {
         return TeraBoxService(account, onAccountUpdated: saveAccount);
       case CloudType.baidu:
         return BaiduService(account, onAccountUpdated: saveAccount);
+      case CloudType.naver:
+        return NaverBoxService(account, onAccountUpdated: saveAccount);
     }
   }
 }

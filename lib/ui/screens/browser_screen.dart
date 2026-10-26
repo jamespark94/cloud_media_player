@@ -2431,6 +2431,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
         icon = Icons.cloud_done_outlined;
         color = Colors.blueAccent;
         break;
+      case CloudType.naver:
+        icon = Icons.cloud_queue_rounded;
+        color = Colors.green;
+        break;
     }
     return Icon(icon, color: color, size: 20);
   }

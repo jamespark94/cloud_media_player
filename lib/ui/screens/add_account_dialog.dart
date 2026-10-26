@@ -47,6 +47,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   final TextEditingController _teraBoxNameController = TextEditingController(text: 'TeraBox');
   final TextEditingController _baiduCookieController = TextEditingController();
   final TextEditingController _baiduNameController = TextEditingController(text: 'Baidu Netdisk');
+  final TextEditingController _naverTokenController = TextEditingController();
+  final TextEditingController _naverNameController = TextEditingController(text: '네이버 MYBOX');
 
 
   // Manual OAuth URL/Code Fallback
@@ -84,6 +86,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     _teraBoxNameController.dispose();
     _baiduCookieController.dispose();
     _baiduNameController.dispose();
+    _naverTokenController.dispose();
+    _naverNameController.dispose();
     _manualUrlController.dispose();
     super.dispose();
   }
@@ -139,6 +143,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         await _saveTeraBox();
       } else if (_selectedType == CloudType.baidu) {
         await _saveBaidu();
+      } else if (_selectedType == CloudType.naver) {
+        await _saveNaver();
       }
       if (mounted) {
         Navigator.pop(context, true);
@@ -473,6 +479,31 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     }
   }
 
+  Future<void> _saveNaver() async {
+    final token = _naverTokenController.text.trim();
+    if (token.isEmpty) {
+      throw Exception('네이버 MYBOX 개인 액세스 토큰(PAT)을 입력해주세요.');
+    }
+
+    setState(() {
+      _statusMessage = '네이버 MYBOX 연결을 확인하고 있습니다...';
+    });
+
+    final newAccount = CloudAccount(
+      id: 'naver_${DateTime.now().millisecondsSinceEpoch}',
+      name: _naverNameController.text.trim().isNotEmpty
+          ? _naverNameController.text.trim()
+          : '네이버 MYBOX',
+      type: CloudType.naver,
+      email: 'MYBOX User',
+      accessToken: token,
+    );
+
+    if (mounted) {
+      await context.read<AccountManager>().saveAccount(newAccount);
+    }
+  }
+
   Future<void> _saveWebDav() async {
     final url = _webDavUrlController.text.trim();
     if (url.isEmpty) throw Exception('WebDAV URL을 입력해주세요.');
@@ -590,6 +621,14 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         ),
         const SizedBox(height: 8),
         _buildServiceTile(
+          type: CloudType.naver,
+          title: '네이버 MYBOX',
+          subtitle: '네이버 MYBOX 개인 액세스 토큰(PAT) 연결',
+          icon: Icons.cloud_queue_rounded,
+          iconColor: Colors.green,
+        ),
+        const SizedBox(height: 8),
+        _buildServiceTile(
           type: CloudType.baidu,
           title: 'Baidu Netdisk (바이두)',
           subtitle: '바이두 클라우드 동영상 스트리밍 (BDUSS 쿠키 연결)',
@@ -693,6 +732,11 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         title = 'TeraBox 연결';
         icon = Icons.cloud_circle_outlined;
         iconColor = Colors.cyanAccent;
+        break;
+      case CloudType.naver:
+        title = '네이버 MYBOX 연결';
+        icon = Icons.cloud_queue_rounded;
+        iconColor = Colors.green;
         break;
       case CloudType.baidu:
         title = 'Baidu Netdisk 연결';
@@ -944,6 +988,82 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                 label: const Text('계정 확인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.cyan.shade700,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ] else if (type == CloudType.naver) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.green.withAlpha(20),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.green.withAlpha(70)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.vpn_key_outlined, size: 18, color: Colors.greenAccent),
+                      SizedBox(width: 8),
+                      Text(
+                        'MYBOX 개인 액세스 토큰(PAT) 발급 방법',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.greenAccent),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '1. 웹 브라우저에서 mybox.naver.com 에 로그인합니다.\n'
+                    '2. 좌측 하단 [설정] ⚙️ → [계정 및 개인 액세스 토큰 관리] 클릭\n'
+                    '3. [토큰 생성] 버튼을 눌러 발급된 토큰을 복사하여 아래에 입력합니다.',
+                    style: TextStyle(fontSize: 11, color: Colors.white70, height: 1.45),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => launchUrl(Uri.parse('https://mybox.naver.com/')),
+                    icon: const Icon(Icons.open_in_new, size: 14),
+                    label: const Text('MYBOX 웹 페이지 열기', style: TextStyle(fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.greenAccent,
+                      side: const BorderSide(color: Colors.greenAccent),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _naverNameController,
+              decoration: const InputDecoration(
+                labelText: '계정 표시 이름',
+                hintText: '예: 내 네이버 MYBOX',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _naverTokenController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: '개인 액세스 토큰 (PAT) (필수) *',
+                hintText: 'mbx_pat_... 또는 발급된 토큰 붙여넣기',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: ElevatedButton.icon(
+                onPressed: _startOAuth,
+                icon: const Icon(Icons.check_circle_outline),
+                label: const Text('계정 확인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.green.shade700,
                   foregroundColor: Colors.white,
                 ),
               ),

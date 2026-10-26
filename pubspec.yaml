@@ -54,6 +54,7 @@ dependencies:
   flutter_volume_controller: ^2.0.2
   fast_gbk: ^1.0.0
   charset_converter: ^2.5.1
+  dio: ^5.11.1
 
 dev_dependencies:
   flutter_test:
