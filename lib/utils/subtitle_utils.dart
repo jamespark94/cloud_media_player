@@ -3,6 +3,15 @@ import 'dart:typed_data';
 import 'package:charset_converter/charset_converter.dart';
 
 class SubtitleUtils {
+  /// 파일 확장자 반환 (소문자 점 포함, 예: '.smi', '.srt')
+  static String getExtension(String fileName) {
+    final lastDot = fileName.lastIndexOf('.');
+    if (lastDot >= 0) {
+      return fileName.substring(lastDot).toLowerCase().trim();
+    }
+    return '';
+  }
+
   /// 파일명에서 확장자를 제외한 기본 파일명을 반환합니다.
   static String getBaseName(String fileName) {
     final lastDot = fileName.lastIndexOf('.');

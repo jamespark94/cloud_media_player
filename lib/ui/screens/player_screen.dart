@@ -150,14 +150,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _tracksSub = _player.stream.tracks.listen((tracks) {
       if (!mounted) return;
 
-      // 0. 초기 사전 다운로드된 외부 자막이 있으면 미디어 로드 완료 시점에 1회 확실하게 재적용
-      if (_pendingInitialSubtitleTrack != null) {
-        final trackToApply = _pendingInitialSubtitleTrack!;
-        _pendingInitialSubtitleTrack = null;
-        debugPrint('[PlayerScreen] 미디어 트랙 생성 완료 -> 초기 자막 재적용 (${trackToApply.title})');
-        _player.setSubtitleTrack(trackToApply);
-        _hasAutoSelectedSubtitle = true;
-      }
+      final trackListLog = tracks.subtitle.map((t) => '[id=${t.id}, title=${t.title}, lang=${t.language}]').join(', ');
+      debugPrint('[PlayerScreen] 자막 트랙 목록 갱신 (${tracks.subtitle.length}개): $trackListLog');
 
       // 1. 자막 끄기 설정이면 'no' 유지
       if (_currentSubtitleType == 'none') {
@@ -167,30 +161,46 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         return;
       }
 
-      // 2. SAMI/SMI 자막의 KRCC 가상 트랙이 mpv에 의해 생성되었는지 확인
-      // (SMI 파일은 SubtitleTrack.uri 등록 후 mpv가 내부 파싱을 거쳐 KRCC 트랙을 별도로 생성하므로 활성화 필수)
+      // 2. SAMI/SMI 자막의 KRCC 가상 트랙이 mpv에 의해 생성되었는지 최우선 확인
+      // (SMI 파일은 SubtitleTrack.uri 등록 후 mpv가 내부 파싱을 거쳐 KRCC 트랙을 별도로 생성하므로 즉시 활성화 필수)
       for (final track in tracks.subtitle) {
         final title = (track.title ?? '').toLowerCase();
-        if (title.contains('krcc')) {
+        final lang = (track.language ?? '').toLowerCase();
+        if (title.contains('krcc') || lang == 'ko' || lang == 'kor') {
           final active = _player.state.track.subtitle;
           if (active.id != track.id) {
-            debugPrint('[PlayerScreen] SAMI KRCC 트랙 활성화: id=${track.id}, title=${track.title}');
+            debugPrint('[PlayerScreen] 한국어/SAMI KRCC 트랙 활성화: id=${track.id}, title=${track.title}, lang=${track.language}');
             _player.setSubtitleTrack(track);
             _hasAutoSelectedSubtitle = true;
+            _pendingInitialSubtitleTrack = null;
           }
           return;
         }
       }
 
+      // 3. 초기 사전 다운로드된 외부 자막이 있으면 미디어 로드 완료 시점에 적용
+      if (_pendingInitialSubtitleTrack != null) {
+        final trackToApply = _pendingInitialSubtitleTrack!;
+        final active = _player.state.track.subtitle;
+        // 이미 유효한 자막 트랙이 선택되어 있다면 덮어쓰지 않음
+        if (active.id == 'no' || active.id == 'auto') {
+          debugPrint('[PlayerScreen] 미디어 트랙 생성 완료 -> 초기 자막 적용 (${trackToApply.title})');
+          _player.setSubtitleTrack(trackToApply);
+        }
+        _pendingInitialSubtitleTrack = null;
+        _hasAutoSelectedSubtitle = true;
+        return;
+      }
+
       // 이미 자막 트랙이 선택되었거나 로드된 경우 중복 호출 차단 (디먹서 재시작 방지)
       if (_hasAutoSelectedSubtitle) return;
 
-      // 3. 외부 자막(클라우드/로컬) 적용 상태인 경우: 일반 내장 트랙 오버라이드 방지
+      // 4. 외부 자막(클라우드/로컬) 적용 상태인 경우: 일반 내장 트랙 오버라이드 방지
       if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
         return;
       }
 
-      // 4. 내장 자막 복원 또는 한국어 트랙 자동 선택
+      // 5. 내장 자막 복원 또는 한국어 트랙 자동 선택
       if (_currentSubtitleType == 'track') {
         _restoreTrackSubtitle(tracks.subtitle);
       } else if (_currentSubtitleType == null) {
@@ -744,15 +754,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   }
 
   /// 클라우드 자막 ID 및 파일명에 포함된 특수문자(|, /, \ 등)를 안전하게 치환하여 로컬 캐시 파일 반환
+  /// (mpv demuxer가 자막 포맷을 정확히 감지할 수 있도록 원본 확장자를 끝에 명확히 보장)
   File _getSafeSubtitleCacheFile(String id, String? name) {
     final tempDir = Directory.systemTemp;
+    final ext = SubtitleUtils.getExtension(name ?? id);
+    final baseWithoutExt = SubtitleUtils.getBaseName(name ?? 'subtitle');
     final safeId = id.replaceAll(RegExp(r'[\\/|:*?"<> ]'), '_');
-    final safeName = (name ?? 'subtitle').replaceAll(RegExp(r'[\\/|:*?"<> ]'), '_');
+    final safeBase = baseWithoutExt.replaceAll(RegExp(r'[\\/|:*?"<> ]'), '_');
     final subDir = Directory('${tempDir.path}/subtitles');
     if (!subDir.existsSync()) {
       subDir.createSync(recursive: true);
     }
-    return File('${subDir.path}/${safeId}_$safeName');
+    // 예: temp/subtitles/safeId_safeBase.smi
+    final safeFileName = ext.isNotEmpty ? '${safeId}_$safeBase$ext' : '${safeId}_$safeBase';
+    return File('${subDir.path}/$safeFileName');
   }
 
   /// 클라우드 자막 파일을 안전하게 다운로드하고, CP949/EUC-KR 등을 UTF-8로 자동 변환하여 캐시 저장
