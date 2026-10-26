@@ -1284,8 +1284,16 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
     final thumbUrl = item.thumbnailUrl ?? record?.thumbnailUrl;
     if (thumbUrl != null && thumbUrl.isNotEmpty) {
+      final isTeraBox = widget.account.type == CloudType.terabox;
       return Image.network(
         thumbUrl,
+        headers: isTeraBox
+            ? {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                'Cookie': 'ndus=${widget.account.accessToken.trim()}',
+                'Referer': 'https://www.terabox.com/',
+              }
+            : null,
         width: width,
         height: height,
         fit: BoxFit.cover,
@@ -2405,6 +2413,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
       case CloudType.webDav:
         icon = Icons.dns;
         color = Colors.teal;
+        break;
+      case CloudType.terabox:
+        icon = Icons.cloud_circle_outlined;
+        color = Colors.cyanAccent;
         break;
     }
     return Icon(icon, color: color, size: 20);

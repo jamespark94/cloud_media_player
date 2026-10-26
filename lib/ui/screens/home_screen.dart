@@ -750,6 +750,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           account.type == CloudType.googleDrive &&
           account.accessToken.isNotEmpty) {
         headers = {'Authorization': 'Bearer ${account.accessToken}'};
+      } else if (account != null && account.type == CloudType.terabox && account.accessToken.isNotEmpty) {
+        headers = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'ndus=${account.accessToken.trim()}',
+          'Referer': 'https://www.terabox.com/',
+        };
+      } else if (account != null && account.type == CloudType.terabox && account.accessToken.isNotEmpty) {
+        headers = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'ndus=${account.accessToken.trim()}',
+          'Referer': 'https://www.terabox.com/',
+        };
       }
       return _buildThumbnailNetworkImage(record.thumbnailUrl!, headers, isFinished);
     }
@@ -834,6 +846,18 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           account.type == CloudType.googleDrive &&
           account.accessToken.isNotEmpty) {
         headers = {'Authorization': 'Bearer ${account.accessToken}'};
+      } else if (account != null && account.type == CloudType.terabox && account.accessToken.isNotEmpty) {
+        headers = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'ndus=${account.accessToken.trim()}',
+          'Referer': 'https://www.terabox.com/',
+        };
+      } else if (account != null && account.type == CloudType.terabox && account.accessToken.isNotEmpty) {
+        headers = {
+          'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+          'Cookie': 'ndus=${account.accessToken.trim()}',
+          'Referer': 'https://www.terabox.com/',
+        };
       }
       return Image.network(
         record.thumbnailUrl!,
@@ -1958,6 +1982,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         icon = Icons.dns;
         color = Colors.teal;
         break;
+      case CloudType.terabox:
+        icon = Icons.cloud_circle_outlined;
+        color = Colors.cyanAccent;
+        break;
     }
     return Icon(icon, size: 13, color: color);
   }
@@ -1989,6 +2017,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       case CloudType.webDav:
         icon = Icons.dns;
         color = Colors.teal;
+        break;
+      case CloudType.terabox:
+        icon = Icons.cloud_circle_outlined;
+        color = Colors.cyanAccent;
         break;
     }
     return Container(
@@ -2030,6 +2062,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         icon = Icons.dns;
         color = Colors.teal;
         break;
+      case CloudType.terabox:
+        icon = Icons.cloud_circle_outlined;
+        color = Colors.cyanAccent;
+        break;
     }
 
     return Container(
@@ -2056,6 +2092,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return 'Dropbox';
       case CloudType.webDav:
         return 'WebDAV / NAS';
+      case CloudType.terabox:
+        return 'TeraBox';
     }
   }
 

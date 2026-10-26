@@ -1,3 +1,5 @@
+﻿import 'package:url_launcher/url_launcher.dart';
+import '../../services/terabox_service.dart';
 import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
@@ -40,6 +42,9 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   final TextEditingController _webDavUrlController = TextEditingController();
   final TextEditingController _webDavUserController = TextEditingController();
   final TextEditingController _webDavPasswordController = TextEditingController();
+  final TextEditingController _teraBoxCookieController = TextEditingController();
+  final TextEditingController _teraBoxNameController = TextEditingController(text: 'TeraBox');
+
 
   // Manual OAuth URL/Code Fallback
   final TextEditingController _manualUrlController = TextEditingController();
@@ -72,6 +77,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     _webDavUrlController.dispose();
     _webDavUserController.dispose();
     _webDavPasswordController.dispose();
+    _teraBoxCookieController.dispose();
+    _teraBoxNameController.dispose();
     _manualUrlController.dispose();
     super.dispose();
   }
@@ -123,6 +130,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         await _authenticateDropbox();
       } else if (_selectedType == CloudType.webDav) {
         await _saveWebDav();
+      } else if (_selectedType == CloudType.terabox) {
+        await _saveTeraBox();
       }
       if (mounted) {
         Navigator.pop(context, true);
@@ -362,6 +371,54 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     }
   }
 
+
+  Future<void> _saveTeraBox() async {
+    final rawCookie = _teraBoxCookieController.text.trim();
+    if (rawCookie.isEmpty) {
+      throw Exception('ndus 쿠키 값을 입력해 주세요.');
+    }
+
+    final ndus = TeraBoxService.normalizeNdusCookie(rawCookie);
+    if (ndus.isEmpty) {
+      throw Exception('유효한 ndus 쿠키 값을 찾을 수 없습니다.');
+    }
+
+    setState(() {
+      _statusMessage = '테라박스 계정 유효성을 확인하고 있습니다...';
+    });
+
+    final tempAccount = CloudAccount(
+      id: 'terabox_${DateTime.now().millisecondsSinceEpoch}',
+      name: _teraBoxNameController.text.trim().isNotEmpty
+          ? _teraBoxNameController.text.trim()
+          : 'TeraBox',
+      type: CloudType.terabox,
+      email: '',
+      accessToken: ndus,
+    );
+
+    final service = TeraBoxService(tempAccount);
+    final result = await service.verifyAccount();
+
+    if (!result.isValid) {
+      throw Exception(result.error ?? '테라박스 연결 검증에 실패했습니다.');
+    }
+
+    final finalAccount = CloudAccount(
+      id: tempAccount.id,
+      name: tempAccount.name,
+      type: CloudType.terabox,
+      email: result.username ?? 'TeraBox User',
+      accessToken: ndus,
+      refreshToken: tempAccount.refreshToken,
+      tokenExpiry: tempAccount.tokenExpiry,
+    );
+
+    if (mounted) {
+      await context.read<AccountManager>().saveAccount(finalAccount);
+    }
+  }
+
   Future<void> _saveWebDav() async {
     final url = _webDavUrlController.text.trim();
     if (url.isEmpty) throw Exception('WebDAV URL을 입력해주세요.');
@@ -469,6 +526,14 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
           icon: Icons.dns,
           iconColor: Colors.teal,
         ),
+        const SizedBox(height: 8),
+        _buildServiceTile(
+          type: CloudType.terabox,
+          title: 'TeraBox',
+          subtitle: '테라박스 클라우드 동영상 스트리밍 (ndus 쿠키 연결)',
+          icon: Icons.cloud_circle_outlined,
+          iconColor: Colors.cyanAccent,
+        ),
       ],
     );
   }
@@ -561,6 +626,11 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         title = 'WebDAV / NAS 연결';
         icon = Icons.dns;
         iconColor = Colors.teal;
+        break;
+      case CloudType.terabox:
+        title = 'TeraBox 연결';
+        icon = Icons.cloud_circle_outlined;
+        iconColor = Colors.cyanAccent;
         break;
       default:
         title = '클라우드 연결';
@@ -732,6 +802,83 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                 onPressed: _startOAuth,
                 icon: const Icon(Icons.link),
                 label: const Text('연결 및 계정 저장'),
+              ),
+            ),
+          ] else if (type == CloudType.terabox) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.cyan.withAlpha(20),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.cyan.withAlpha(70)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.info_outline, size: 18, color: Colors.cyanAccent),
+                      SizedBox(width: 8),
+                      Text(
+                        '테라박스 ndus 쿠키 확인 방법',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.cyanAccent),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '1. PC 브라우저에서 terabox.com 에 로그인합니다.\n'
+                    '2. F12 (개발자 도구) → [Application] (또는 저장용량) → [Cookies] → [https://www.terabox.com] 클릭\n'
+                    '3. 이름 목록 중 "ndus" 항목의 Value 값을 복사하여 아래에 붙여넣습니다.\n'
+                    '   (전체 Cookie 헤더 문자열을 그대로 붙여넣어도 자동으로 추출됩니다)',
+                    style: TextStyle(fontSize: 11, color: Colors.white70, height: 1.45),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => launchUrl(Uri.parse('https://www.terabox.com/')),
+                    icon: const Icon(Icons.open_in_new, size: 14),
+                    label: const Text('웹 브라우저로 TeraBox 열기', style: TextStyle(fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.cyanAccent,
+                      side: const BorderSide(color: Colors.cyanAccent),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _teraBoxNameController,
+              decoration: const InputDecoration(
+                labelText: '계정 표시 이름',
+                hintText: '예: 내 테라박스',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _teraBoxCookieController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'ndus 쿠키 값 (필수) *',
+                hintText: 'ndus=Y-xxxx... 또는 Y-xxxx...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: ElevatedButton.icon(
+                onPressed: _startOAuth,
+                icon: const Icon(Icons.check_circle_outline),
+                label: const Text('계정 확인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.cyan.shade700,
+                  foregroundColor: Colors.white,
+                ),
               ),
             ),
           ] else ...[

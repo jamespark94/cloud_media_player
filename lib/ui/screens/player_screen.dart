@@ -11,6 +11,7 @@ import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:provider/provider.dart';
 import '../../models/media_item.dart';
+import '../../models/player_orientation_mode.dart';
 import '../../services/account_manager.dart';
 import '../../services/cloud_playback_sync_service.dart';
 import '../../services/cloud_service_interface.dart';
@@ -47,6 +48,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   Duration _totalDuration = Duration.zero;
   Duration? _dragPosition;
   bool _isFullScreen = !Platform.isWindows && !Platform.isLinux && !Platform.isMacOS;
+  PlayerOrientationMode _orientationMode = PlayerOrientationMode.landscape;
 
   StreamSubscription? _autoPlaySub;
   StreamSubscription? _tracksSub;
@@ -226,10 +228,20 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _initContrast();
     _initVolume();
     SubtitleSettingsService.instance.init();
-    if (_isFullScreen) {
-      _applyMobileFullScreen(true);
-    }
+    _initOrientationMode();
     _initAndPlay();
+  }
+
+  Future<void> _initOrientationMode() async {
+    final mode = await PlayerOrientationMode.load();
+    if (mounted) {
+      setState(() {
+        _orientationMode = mode;
+      });
+      if (_isFullScreen) {
+        _applyMobileFullScreen(true);
+      }
+    }
   }
 
   Future<void> _initAndPlay() async {
@@ -259,7 +271,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         _hasCapturedThumbnail = true;
       }
 
-      // libmpv 자막 우선순위 및 고성능 네트워크 스트리밍 버퍼 캐시 설정
+      // libmpv / HLS 고성능 네트워크 스트리밍 버퍼 캐시 및 헤더 설정
       try {
         final platform = (_player.platform as dynamic);
         await platform?.setProperty('slang', 'ko,kor,korean,kr');
@@ -272,6 +284,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         await platform?.setProperty('network-timeout', '15');
         await platform?.setProperty('force-seekable', 'yes');
         await platform?.setProperty('hr-seek', 'default');
+
+        // HLS(.m3u8) 세그먼트 및 암호화 키 요청 시 인증 쿠키/헤더 유지용 demuxer-lavf-o 설정
+        final streamHeaders = await widget.service.getStreamHeaders();
+        if (streamHeaders.isNotEmpty) {
+          final headerString = streamHeaders.entries
+              .map((e) => '${e.key}: ${e.value}')
+              .join('\r\n');
+          await platform?.setProperty('demuxer-lavf-o', 'headers=$headerString\r\n');
+        }
       } catch (_) {}
 
       // 2. 외부 자막 사전 탐색 및 다운로드 (재생 도중 네트워크 대역폭 잠식 및 디먹서 3회 재시작 방지)
@@ -517,12 +538,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   /// 모바일(Android/iOS) 전체화면 및 시스템 UI(상단바 날짜/배터리 등) 제어
   Future<void> _applyMobileFullScreen(bool enable) async {
     if (enable) {
-      // 1. Flutter SystemChrome 가로모드 및 ImmersiveSticky 모드 적용
+      // 1. Flutter SystemChrome 화면 회전 모드 및 ImmersiveSticky 모드 적용
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
-      await SystemChrome.setPreferredOrientations([
-        DeviceOrientation.landscapeLeft,
-        DeviceOrientation.landscapeRight,
-      ]);
+      await SystemChrome.setPreferredOrientations(_orientationMode.deviceOrientations);
       // 2. Android 플랫폼 네이티브 WindowInsetsController로 시스템 상태바(시간/날짜/배터리) 완전 숨김
       if (Platform.isAndroid) {
         try {
@@ -541,6 +559,34 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           await channel.invokeMethod('setFullScreen', {'enable': false});
         } catch (_) {}
       }
+    }
+  }
+
+  /// 화면 회전 모드 변경 및 영구 저장
+  Future<void> _setOrientationMode(PlayerOrientationMode mode) async {
+    setState(() {
+      _orientationMode = mode;
+    });
+    await mode.save();
+    if (_isFullScreen && !Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) {
+      await SystemChrome.setPreferredOrientations(mode.deviceOrientations);
+    }
+    _showNotificationBanner(
+      message: '화면 회전: ${mode.label}',
+      icon: _getOrientationIcon(mode),
+      iconColor: Colors.lightBlueAccent,
+      duration: const Duration(seconds: 2),
+    );
+  }
+
+  IconData _getOrientationIcon(PlayerOrientationMode mode) {
+    switch (mode) {
+      case PlayerOrientationMode.landscape:
+        return Icons.screen_lock_landscape;
+      case PlayerOrientationMode.portrait:
+        return Icons.screen_lock_portrait;
+      case PlayerOrientationMode.sensor:
+        return Icons.screen_rotation;
     }
   }
 
@@ -2007,6 +2053,51 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             tooltip: '자막 설정 (SMI/SRT/다국어)',
             onPressed: _openSubtitleDialog,
           ),
+          if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS)
+            PopupMenuButton<PlayerOrientationMode>(
+              icon: Icon(
+                _getOrientationIcon(_orientationMode),
+                color: Colors.white,
+              ),
+              tooltip: '화면 회전 모드: ${_orientationMode.label}',
+              initialValue: _orientationMode,
+              onSelected: (mode) {
+                _setOrientationMode(mode);
+                _startHideTimer();
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: PlayerOrientationMode.landscape,
+                  child: Row(
+                    children: [
+                      Icon(Icons.screen_lock_landscape, size: 20, color: Colors.white70),
+                      SizedBox(width: 8),
+                      Text('가로 고정'),
+                    ],
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: PlayerOrientationMode.portrait,
+                  child: Row(
+                    children: [
+                      Icon(Icons.screen_lock_portrait, size: 20, color: Colors.white70),
+                      SizedBox(width: 8),
+                      Text('세로 고정'),
+                    ],
+                  ),
+                ),
+                const PopupMenuItem(
+                  value: PlayerOrientationMode.sensor,
+                  child: Row(
+                    children: [
+                      Icon(Icons.screen_rotation, size: 20, color: Colors.white70),
+                      SizedBox(width: 8),
+                      Text('센서 자동 가변'),
+                    ],
+                  ),
+                ),
+              ],
+            ),
           IconButton(
             icon: Icon(
               _isFullScreen ? Icons.fullscreen_exit : Icons.fullscreen,

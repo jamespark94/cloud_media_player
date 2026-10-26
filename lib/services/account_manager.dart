@@ -1,3 +1,4 @@
+import 'terabox_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import '../models/cloud_account.dart';
@@ -109,6 +110,8 @@ class AccountManager extends ChangeNotifier {
         return BoxService(account, onAccountUpdated: saveAccount);
       case CloudType.dropbox:
         return DropboxService(account, onAccountUpdated: saveAccount);
+      case CloudType.terabox:
+        return TeraBoxService(account, onAccountUpdated: saveAccount);
     }
   }
 }

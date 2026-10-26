@@ -7,6 +7,7 @@ enum CloudType {
   box,
   dropbox,
   local,
+  terabox,
 }
 
 class CloudAccount {

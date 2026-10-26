@@ -74,6 +74,8 @@ class LocalStreamProxy {
       final contentType = proxyRes.headers['content-type'];
       if (contentType != null && contentType.isNotEmpty) {
         request.response.headers.set(HttpHeaders.contentTypeHeader, contentType);
+      } else if (targetUrl.contains('.m3u8') || targetUrl.contains('api/streaming')) {
+        request.response.headers.set(HttpHeaders.contentTypeHeader, 'application/vnd.apple.mpegurl');
       } else {
         request.response.headers.set(HttpHeaders.contentTypeHeader, 'video/mp4');
       }
