@@ -150,21 +150,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _tracksSub = _player.stream.tracks.listen((tracks) {
       if (!mounted) return;
 
-      // 0. 초기 사전 다운로드된 외부 자막이 있으면 미디어 로드 완료 시점에 확실하게 재적용
+      // 0. 초기 사전 다운로드된 외부 자막이 있으면 미디어 로드 완료 시점에 1회 확실하게 재적용
       if (_pendingInitialSubtitleTrack != null) {
         final trackToApply = _pendingInitialSubtitleTrack!;
+        _pendingInitialSubtitleTrack = null;
         debugPrint('[PlayerScreen] 미디어 트랙 생성 완료 -> 초기 자막 재적용 (${trackToApply.title})');
         _player.setSubtitleTrack(trackToApply);
         _hasAutoSelectedSubtitle = true;
-        // 미디어 트랙 생성 직후 mpv 내부 비동기 sid 갱신 완료를 위해 약간의 시차 후 1회 더 보장 적용
-        Future.delayed(const Duration(milliseconds: 300), () {
-          if (!mounted) return;
-          if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
-            _player.setSubtitleTrack(trackToApply);
-          }
-        });
-        _pendingInitialSubtitleTrack = null;
-        return;
       }
 
       // 1. 자막 끄기 설정이면 'no' 유지
@@ -175,25 +167,27 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         return;
       }
 
-      // 이미 자막 트랙이 선택되었거나 로드된 경우 중복 호출 차단 (디먹서 재시작 방지)
-      if (_hasAutoSelectedSubtitle) return;
-
-      // 2. 외부 자막(클라우드/로컬) 적용 상태인 경우: 내장 트랙 자동 선택 방지
-      if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
-        return;
-      }
-
-      // 3. SAMI의 KRCC 트랙이 감지되면 즉시 한국어 트랙으로 전환
+      // 2. SAMI/SMI 자막의 KRCC 가상 트랙이 mpv에 의해 생성되었는지 확인
+      // (SMI 파일은 SubtitleTrack.uri 등록 후 mpv가 내부 파싱을 거쳐 KRCC 트랙을 별도로 생성하므로 활성화 필수)
       for (final track in tracks.subtitle) {
         final title = (track.title ?? '').toLowerCase();
         if (title.contains('krcc')) {
           final active = _player.state.track.subtitle;
           if (active.id != track.id) {
+            debugPrint('[PlayerScreen] SAMI KRCC 트랙 활성화: id=${track.id}, title=${track.title}');
             _player.setSubtitleTrack(track);
             _hasAutoSelectedSubtitle = true;
           }
           return;
         }
+      }
+
+      // 이미 자막 트랙이 선택되었거나 로드된 경우 중복 호출 차단 (디먹서 재시작 방지)
+      if (_hasAutoSelectedSubtitle) return;
+
+      // 3. 외부 자막(클라우드/로컬) 적용 상태인 경우: 일반 내장 트랙 오버라이드 방지
+      if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
+        return;
       }
 
       // 4. 내장 자막 복원 또는 한국어 트랙 자동 선택
@@ -444,13 +438,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         _hasAutoSelectedSubtitle = true;
         _saveCurrentPosition();
 
-        // libmpv 스트림 디먹싱 완료 후 SRT 자막 트랙 연결이 풀리지 않도록 500ms 후 확정 재적용
-        Future.delayed(const Duration(milliseconds: 500), () {
-          if (!mounted) return;
-          if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
-            _player.setSubtitleTrack(subTrack);
-          }
-        });
         if (mounted && initialSubtitleName != null) {
           final isRestored = _currentSubtitleType != null;
           _showNotificationBanner(
