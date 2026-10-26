@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -773,7 +774,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   /// (안드로이드 파일명 255바이트 한도 초과(OS Error: File name too long)를 방지하기 위해 해시 기반 고유 키 사용)
   File _getSafeSubtitleCacheFile(String id, String? name) {
     final tempDir = Directory.systemTemp;
-    final ext = SubtitleUtils.getExtension(name ?? id);
+    var ext = SubtitleUtils.getExtension(name ?? id);
+    // SMI는 SRT로 변환하여 캐시하므로 확장자도 .srt 사용
+    if (ext == '.smi') ext = '.srt';
     // id와 name을 조합하여 짧은 32비트 hex 고유 해시 키 생성 (안드로이드 255바이트 한도 방지)
     final hashKey = '${id}_${name ?? ''}'.hashCode.toUnsigned(32).toRadixString(16);
     final subDir = Directory('${tempDir.path}/subtitles');
@@ -815,7 +818,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         }
 
         // CP949 / EUC-KR / GBK -> UTF-8 트랜스코딩
-        final normalizedBytes = await SubtitleUtils.normalizeSubtitleToUtf8Bytes(bytes);
+        var normalizedBytes = await SubtitleUtils.normalizeSubtitleToUtf8Bytes(bytes);
+        // SMI는 mpv가 트랙으로 인식하지 못하므로 SRT로 변환하여 저장
+        if (SubtitleUtils.getExtension(subItem.name) == '.smi') {
+          final srt = SubtitleUtils.smiToSrt(utf8.decode(normalizedBytes, allowMalformed: true));
+          if (srt.isEmpty) {
+            debugPrint('[PlayerScreen] SMI -> SRT 변환 결과가 비어있습니다.');
+            return null;
+          }
+          normalizedBytes = Uint8List.fromList(utf8.encode(srt));
+        }
         await cached.writeAsBytes(normalizedBytes);
         debugPrint('[PlayerScreen] 자막 UTF-8 변환 및 캐시 완료: ${cached.path} (${normalizedBytes.length} bytes)');
         return cached;

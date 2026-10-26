@@ -164,6 +164,83 @@ class SubtitleUtils {
     return utf8.decode(u8Bytes, allowMalformed: true);
   }
 
+  /// SAMI(.smi) 텍스트를 SRT 텍스트로 변환합니다. (mpv가 SMI를 직접 파싱하지 못하는 문제 우회)
+  /// 여러 언어 클래스가 있으면 한국어(KRCC/KO) 우선, 없으면 첫 번째 클래스를 사용합니다.
+  static String smiToSrt(String smi) {
+    final syncRe = RegExp(r'<sync\s+start\s*=\s*"?(\d+)"?[^>]*>', caseSensitive: false);
+    final matches = syncRe.allMatches(smi).toList();
+    if (matches.isEmpty) return '';
+
+    // 클래스 선택
+    final classRe = RegExp(r'<p\s+class\s*=\s*"?([\w-]+)"?', caseSensitive: false);
+    final classes = <String>[];
+    for (final m in classRe.allMatches(smi)) {
+      final c = m.group(1)!.toLowerCase();
+      if (!classes.contains(c)) classes.add(c);
+    }
+    String? chosen;
+    for (final c in classes) {
+      if (c.contains('kr') || c == 'ko' || c == 'kor') {
+        chosen = c;
+        break;
+      }
+    }
+    chosen ??= classes.isNotEmpty ? classes.first : null;
+
+    final entries = <MapEntry<int, String>>[];
+    for (var i = 0; i < matches.length; i++) {
+      final start = int.parse(matches[i].group(1)!);
+      final end = i + 1 < matches.length ? matches[i + 1].start : smi.length;
+      final body = smi.substring(matches[i].end, end);
+
+      String? text;
+      final pMatches = RegExp(r'<p\s+class\s*=\s*"?([\w-]+)"?[^>]*>', caseSensitive: false).allMatches(body).toList();
+      if (pMatches.isEmpty) {
+        text = body;
+      } else {
+        for (var j = 0; j < pMatches.length; j++) {
+          final cls = pMatches[j].group(1)!.toLowerCase();
+          if (chosen != null && cls != chosen) continue;
+          final pEnd = j + 1 < pMatches.length ? pMatches[j + 1].start : body.length;
+          text = body.substring(pMatches[j].end, pEnd);
+          break;
+        }
+      }
+      var clean = (text ?? '')
+          .replaceAll(RegExp(r'<br\s*/?>', caseSensitive: false), '\n')
+          .replaceAll(RegExp(r'<[^>]*>'), '')
+          .replaceAll('&nbsp;', ' ')
+          .replaceAll('&lt;', '<')
+          .replaceAll('&gt;', '>')
+          .replaceAll('&amp;', '&')
+          .replaceAll('\r', '');
+      clean = clean.split('\n').map((l) => l.trim()).where((l) => l.isNotEmpty).join('\n');
+      entries.add(MapEntry(start, clean));
+    }
+
+    String ts(int ms) {
+      final h = (ms ~/ 3600000).toString().padLeft(2, '0');
+      final m = ((ms ~/ 60000) % 60).toString().padLeft(2, '0');
+      final s = ((ms ~/ 1000) % 60).toString().padLeft(2, '0');
+      final z = (ms % 1000).toString().padLeft(3, '0');
+      return '$h:$m:$s,$z';
+    }
+
+    final buf = StringBuffer();
+    var idx = 1;
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i].value.isEmpty) continue;
+      final start = entries[i].key;
+      var end = i + 1 < entries.length ? entries[i + 1].key : start + 3000;
+      if (end <= start) end = start + 1000;
+      buf.writeln(idx++);
+      buf.writeln('${ts(start)} --> ${ts(end)}');
+      buf.writeln(entries[i].value);
+      buf.writeln();
+    }
+    return buf.toString();
+  }
+
   /// 자막 바이트 데이터를 UTF-8 바이트(UTF-8 BOM 포함)로 변환하여 libmpv 및 파서 호환성을 극대화합니다.
   static Future<Uint8List> normalizeSubtitleToUtf8Bytes(List<int> rawBytes) async {
     final text = await decodeSubtitleToUtf8String(rawBytes);
