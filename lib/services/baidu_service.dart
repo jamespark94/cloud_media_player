@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/media_item.dart';
+import '../models/video_quality.dart';
 import 'cloud_service_interface.dart';
 
 class BaiduService extends CloudService {
@@ -75,10 +76,17 @@ class BaiduService extends CloudService {
   /// 쿠키 헤더 문자열 반환
   String get cookieHeader {
     final token = account.accessToken.trim();
+    String baseCookie;
     if (token.contains('=')) {
-      return token;
+      baseCookie = token;
+    } else {
+      baseCookie = 'BDUSS=$token';
     }
-    return 'BDUSS=$token';
+    // pan.baidu.com 웹 API 인증에 필수적인 PANWEB=1 쿠키 주입
+    if (!baseCookie.contains('PANWEB=')) {
+      baseCookie = 'PANWEB=1; $baseCookie';
+    }
+    return baseCookie;
   }
 
   /// jsToken 획득 및 유효성 확인
@@ -323,11 +331,35 @@ class BaiduService extends CloudService {
     }).toList();
   }
 
-  /// 미디어 스트리밍 URL 반환 (HLS 우선 시도 -> PCS locatedownload -> filemetas dlink -> 302 Pre-resolution)
+  /// 지원하는 화질 목록 (HLS 변환 화질 + 원본)
+  @override
+  Future<List<VideoQuality>> getAvailableQualities(MediaItem item) async {
+    return const [
+      VideoQuality.q360p,
+      VideoQuality.q480p,
+      VideoQuality.q720p,
+      VideoQuality.original,
+    ];
+  }
+
+  /// 무료 계정 대역폭을 고려해 초기 재생 시 360p(빠른 로딩) 권장
+  @override
+  VideoQuality getDefaultPlaybackQuality() => VideoQuality.q360p;
+
+  /// 특정 화질 HLS 또는 원본 스트리밍 URL 반환
+  @override
+  Future<String> getStreamUrlWithQuality(MediaItem item, VideoQuality quality) async {
+    return _resolveStreamUrl(item, quality);
+  }
+
+  /// 기본 미디어 스트리밍 URL 반환 (기본 권장 화질 적용)
   @override
   Future<String> getStreamUrl(MediaItem item) async {
-    await refreshTokensIfNeeded();
+    return _resolveStreamUrl(item, getDefaultPlaybackQuality());
+  }
 
+  Future<String> _resolveStreamUrl(MediaItem item, VideoQuality targetQuality) async {
+    await refreshTokensIfNeeded();
     final fsId = _extractFsId(item.id);
     final filePath = _extractPath(item.id);
 
@@ -335,7 +367,7 @@ class BaiduService extends CloudService {
       throw Exception('유효하지 않은 Baidu 파일 ID: ${item.id}');
     }
 
-    final cacheKey = fsId.isNotEmpty ? fsId : filePath;
+    final cacheKey = '${fsId.isNotEmpty ? fsId : filePath}_${targetQuality.id}';
 
     // 캐시 확인
     final cached = _streamUrlCache[cacheKey];
@@ -343,11 +375,11 @@ class BaiduService extends CloudService {
       return cached.url;
     }
 
-    // 1. 바이두 /api/streaming HLS(M3U8) 어댑티브 스트리밍 우선 시도
-    if (filePath.isNotEmpty && filePath != fsId) {
-      final hlsUrl = await _fetchHlsStreamUrl(filePath, fsId);
+    // 1. 비디오 파일이고 원본 요청이 아닐 경우, 바이두 HLS(M3U8) 스트리밍 시도 (자막 파일은 직링크 다운로드)
+    if (!targetQuality.isOriginal && !item.isSubtitle && filePath.isNotEmpty && filePath != fsId) {
+      final hlsUrl = await _fetchHlsStreamUrl(filePath, fsId, targetQuality);
       if (hlsUrl != null && hlsUrl.isNotEmpty) {
-        debugPrint('[BaiduService] HLS 스트림 URL 획득 성공: $hlsUrl');
+        debugPrint('[BaiduService] HLS (${targetQuality.id}) 스트림 URL 획득 성공: $hlsUrl');
         _streamUrlCache[cacheKey] = (
           url: hlsUrl,
           expiry: DateTime.now().add(const Duration(hours: 3)),
@@ -466,42 +498,123 @@ class BaiduService extends CloudService {
   }
 
   /// /api/streaming API로부터 HLS 스트림 URL 획득 시도
-  Future<String?> _fetchHlsStreamUrl(String filePath, String fsId) async {
-    final qualities = ['M3U8_AUTO_720', 'M3U8_AUTO_480', 'M3U8_AUTO_360'];
+  Future<String?> _fetchHlsStreamUrl(String filePath, String fsId, [VideoQuality? quality]) async {
+    List<String> qualities;
+    if (quality != null) {
+      if (quality == VideoQuality.q360p) {
+        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720'];
+      } else if (quality == VideoQuality.q480p) {
+        qualities = ['M3U8_AUTO_480', 'M3U8_AUTO_360', 'M3U8_AUTO_720'];
+      } else if (quality == VideoQuality.q720p) {
+        qualities = ['M3U8_AUTO_720', 'M3U8_AUTO_480', 'M3U8_AUTO_360'];
+      } else {
+        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720'];
+      }
+    } else {
+      qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720'];
+    }
 
-    for (final quality in qualities) {
-      final streamUri = Uri.parse('https://pan.baidu.com/api/streaming').replace(
-        queryParameters: {
+    // 1차: 웹 클라이언트 (clienttype=0), 2차: 모바일 클라이언트 (clienttype=1)
+    final clientConfigs = [
+      {'clienttype': '0', 'channel': 'chunlei', 'web': '1'},
+      {'clienttype': '1', 'channel': 'baiduyun', 'web': '0'},
+    ];
+
+    for (final cfg in clientConfigs) {
+      for (final q in qualities) {
+        final query = <String, String>{
           'app_id': appId,
-          'web': '1',
-          'channel': 'chunlei',
-          'clienttype': '0',
+          'web': cfg['web']!,
+          'channel': cfg['channel']!,
+          'clienttype': cfg['clienttype']!,
           'isplayer': '1',
           'check_blue': '1',
-          'type': quality,
+          'type': q,
           'path': filePath,
+          'vip': '0',
           if (fsId.isNotEmpty) 'fsid': fsId,
-          if (_cachedJsToken != null && _cachedJsToken!.isNotEmpty) 'jsToken': _cachedJsToken!,
-        },
+          if (cfg['clienttype'] == '0' && _cachedJsToken != null && _cachedJsToken!.isNotEmpty)
+            'jsToken': _cachedJsToken!,
+        };
+
+        final streamUri = Uri.parse('https://pan.baidu.com/api/streaming').replace(
+          queryParameters: query,
+        );
+
+        final client = http.Client();
+        try {
+          final req = http.Request('GET', streamUri)
+            ..followRedirects = false
+            ..headers.addAll({
+              'User-Agent': defaultUserAgent,
+              'Cookie': cookieHeader,
+              'Referer': 'https://pan.baidu.com/disk/main',
+              'Accept': '*/*',
+            });
+
+          final streamedRes = await client.send(req);
+
+          if (streamedRes.isRedirect && streamedRes.headers['location'] != null) {
+            final location = streamedRes.headers['location']!;
+            if (location.isNotEmpty) {
+              return location;
+            }
+          }
+
+          if (streamedRes.statusCode == 200) {
+            final bodyBytes = await streamedRes.stream.toBytes();
+            final bodyText = utf8.decode(bodyBytes, allowMalformed: true);
+
+            if (bodyText.contains('#EXTM3U')) {
+              return streamUri.toString();
+            }
+
+            try {
+              final json = jsonDecode(bodyText);
+              if (json is Map) {
+                if (json['errno'] != null && json['errno'] != 0) {
+                  debugPrint('[BaiduService] HLS 응답 errno: ${json['errno']} (type: $q, client: ${cfg['clienttype']}, body: $bodyText)');
+                  continue;
+                }
+                final directM3u8 = json['url'] ??
+                    json['m3u8'] ??
+                    json['m3u8_url'] ??
+                    json['streaming_url'] ??
+                    json['dlink'];
+                if (directM3u8 != null && directM3u8.toString().isNotEmpty) {
+                  return directM3u8.toString();
+                }
+              }
+            } catch (_) {}
+          }
+        } catch (e) {
+          debugPrint('[BaiduService] HLS 스트리밍 엔드포인트($q) 요청 실패: $e');
+        } finally {
+          client.close();
+        }
+      }
+    }
+    // 3차: PCS REST streaming API 시도 (BDUSS 전용 고속 엔드포인트)
+    for (final q in qualities) {
+      final pcsStreamingUri = Uri.parse(
+        'https://d.pcs.baidu.com/rest/2.0/pcs/file?method=streaming&app_id=$appId&path=${Uri.encodeComponent(filePath)}&type=$q',
       );
 
+      final client = http.Client();
       try {
-        final client = http.Client();
-        final req = http.Request('GET', streamUri)
+        final req = http.Request('GET', pcsStreamingUri)
           ..followRedirects = false
           ..headers.addAll({
-            'User-Agent': defaultUserAgent,
+            'User-Agent': pcsUserAgent,
             'Cookie': cookieHeader,
-            'Referer': 'https://pan.baidu.com/',
-            'Accept': '*/*',
           });
 
         final streamedRes = await client.send(req);
-        client.close();
 
         if (streamedRes.isRedirect && streamedRes.headers['location'] != null) {
           final location = streamedRes.headers['location']!;
           if (location.isNotEmpty) {
+            debugPrint('[BaiduService] PCS HLS 302 발견: $location');
             return location;
           }
         }
@@ -509,32 +622,18 @@ class BaiduService extends CloudService {
         if (streamedRes.statusCode == 200) {
           final bodyBytes = await streamedRes.stream.toBytes();
           final bodyText = utf8.decode(bodyBytes, allowMalformed: true);
-
           if (bodyText.contains('#EXTM3U')) {
-            return streamUri.toString();
+            debugPrint('[BaiduService] PCS HLS 플레이리스트 획득 성공 ($q)');
+            return pcsStreamingUri.toString();
           }
-
-          try {
-            final json = jsonDecode(bodyText);
-            if (json is Map) {
-              if (json['errno'] != null && json['errno'] != 0) {
-                continue;
-              }
-              final directM3u8 = json['url'] ??
-                  json['m3u8'] ??
-                  json['m3u8_url'] ??
-                  json['streaming_url'] ??
-                  json['dlink'];
-              if (directM3u8 != null && directM3u8.toString().isNotEmpty) {
-                return directM3u8.toString();
-              }
-            }
-          } catch (_) {}
         }
       } catch (e) {
-        debugPrint('[BaiduService] HLS 스트리밍 엔드포인트($quality) 요청 실패: $e');
+        debugPrint('[BaiduService] PCS HLS 요청 실패 ($q): $e');
+      } finally {
+        client.close();
       }
     }
+
     return null;
   }
 

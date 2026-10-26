@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/media_item.dart';
+import '../models/video_quality.dart';
 import 'cloud_service_interface.dart';
 
 class TeraBoxService extends CloudService {
@@ -276,11 +277,35 @@ class TeraBoxService extends CloudService {
     }).toList();
   }
 
-  /// 미디어 스트리밍 URL 반환 (HLS m3u8 우선 시도, 실패 시 dlink 원본 파일 폴백)
+  /// 지원하는 화질 목록 (HLS 변환 화질 + 원본)
+  @override
+  Future<List<VideoQuality>> getAvailableQualities(MediaItem item) async {
+    return const [
+      VideoQuality.q360p,
+      VideoQuality.q480p,
+      VideoQuality.q720p,
+      VideoQuality.original,
+    ];
+  }
+
+  /// 무료 계정 대역폭을 고려해 초기 재생 시 360p(빠른 로딩) 권장
+  @override
+  VideoQuality getDefaultPlaybackQuality() => VideoQuality.q360p;
+
+  /// 특정 화질 HLS 또는 원본 스트리밍 URL 반환
+  @override
+  Future<String> getStreamUrlWithQuality(MediaItem item, VideoQuality quality) async {
+    return _resolveStreamUrl(item, quality);
+  }
+
+  /// 기본 미디어 스트리밍 URL 반환 (기본 권장 화질 적용)
   @override
   Future<String> getStreamUrl(MediaItem item) async {
-    await refreshTokensIfNeeded();
+    return _resolveStreamUrl(item, getDefaultPlaybackQuality());
+  }
 
+  Future<String> _resolveStreamUrl(MediaItem item, VideoQuality targetQuality) async {
+    await refreshTokensIfNeeded();
     final fsId = _extractFsId(item.id);
     final filePath = _extractPath(item.id);
 
@@ -288,7 +313,7 @@ class TeraBoxService extends CloudService {
       throw Exception('유효하지 않은 TeraBox 파일 ID: ${item.id}');
     }
 
-    final cacheKey = fsId.isNotEmpty ? fsId : filePath;
+    final cacheKey = '${fsId.isNotEmpty ? fsId : filePath}_${targetQuality.id}';
 
     // 캐시 확인
     final cached = _streamUrlCache[cacheKey];
@@ -296,11 +321,11 @@ class TeraBoxService extends CloudService {
       return cached.url;
     }
 
-    // 1. /api/streaming 비공식 API로 HLS(M3U8) 스트림 URL 우선 획득 시도 (버퍼링 최소화 및 어댑티브 스트리밍)
-    if (filePath.isNotEmpty && filePath != fsId) {
-      final hlsUrl = await _fetchHlsStreamUrl(filePath, fsId);
+    // 1. 비디오 파일이고 원본 요청이 아닐 경우, /api/streaming 비공식 API로 HLS(M3U8) 스트림 URL 우선 획득 시도
+    if (!targetQuality.isOriginal && !item.isSubtitle && filePath.isNotEmpty && filePath != fsId) {
+      final hlsUrl = await _fetchHlsStreamUrl(filePath, fsId, targetQuality);
       if (hlsUrl != null && hlsUrl.isNotEmpty) {
-        debugPrint('[TeraBoxService] HLS 스트림 URL 획득 성공: $hlsUrl');
+        debugPrint('[TeraBoxService] HLS (${targetQuality.id}) 스트림 URL 획득 성공: $hlsUrl');
         _streamUrlCache[cacheKey] = (
           url: hlsUrl,
           expiry: DateTime.now().add(const Duration(hours: 3)),
@@ -403,12 +428,26 @@ class TeraBoxService extends CloudService {
     return finalStreamUrl;
   }
 
-  /// /api/streaming 비공식 API로부터 M3U8_AUTO_720 / M3U8_AUTO_480 HLS 스트림 URL 획득
-  Future<String?> _fetchHlsStreamUrl(String filePath, String fsId) async {
-    // 720p 우선 시도, 없으면 480p, 360p 순차 시도
-    final qualities = ['M3U8_AUTO_720', 'M3U8_AUTO_480', 'M3U8_AUTO_360'];
+  /// /api/streaming 비공식 API로부터 HLS 스트림 URL 획득
+  /// TeraBox 무료 계정은 360p만 무제한 제공되며, 480p/720p는 VIP 전용이거나 청크 전송이 차단되므로
+  /// 360p를 항상 안정적인 최우선 후보로 배치합니다.
+  Future<String?> _fetchHlsStreamUrl(String filePath, String fsId, [VideoQuality? quality]) async {
+    List<String> qualities;
+    if (quality != null) {
+      if (quality == VideoQuality.q360p) {
+        qualities = ['M3U8_AUTO_360'];
+      } else if (quality == VideoQuality.q480p) {
+        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480'];
+      } else if (quality == VideoQuality.q720p) {
+        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_720'];
+      } else {
+        qualities = ['M3U8_AUTO_360'];
+      }
+    } else {
+      qualities = ['M3U8_AUTO_360'];
+    }
 
-    for (final quality in qualities) {
+    for (final q in qualities) {
       final streamUri = Uri.parse('https://www.terabox.com/api/streaming').replace(
         queryParameters: {
           'app_id': appId,
@@ -417,15 +456,15 @@ class TeraBoxService extends CloudService {
           'clienttype': '0',
           'isplayer': '1',
           'check_blue': '1',
-          'type': quality,
+          'type': q,
           'path': filePath,
           if (fsId.isNotEmpty) 'fsid': fsId,
-          'jsToken': _cachedJsToken ?? '',
+          if (_cachedJsToken != null && _cachedJsToken!.isNotEmpty) 'jsToken': _cachedJsToken!,
         },
       );
 
+      final client = http.Client();
       try {
-        final client = http.Client();
         final req = http.Request('GET', streamUri)
           ..followRedirects = false
           ..headers.addAll({
@@ -436,7 +475,6 @@ class TeraBoxService extends CloudService {
           });
 
         final streamedRes = await client.send(req);
-        client.close();
 
         // 1. 302/301 리다이렉트된 Location 헤더가 HLS m3u8 주소인 경우
         if (streamedRes.isRedirect && streamedRes.headers['location'] != null) {
@@ -461,7 +499,7 @@ class TeraBoxService extends CloudService {
             final json = jsonDecode(bodyText);
             if (json is Map) {
               if (json['errno'] != null && json['errno'] != 0) {
-                debugPrint('[TeraBoxService] HLS 스트리밍 응답 errno: ${json['errno']}');
+                debugPrint('[TeraBoxService] HLS 스트리밍 응답 errno: ${json['errno']} (type: $q)');
                 continue; // 다음 해상도 시도 또는 폴백
               }
               final directM3u8 = json['url'] ??
@@ -479,7 +517,9 @@ class TeraBoxService extends CloudService {
           debugPrint('[TeraBoxService] HLS 응답에 #EXTM3U 또는 유효 URL 없음 (길이: ${bodyText.length})');
         }
       } catch (e) {
-        debugPrint('[TeraBoxService] HLS 스트리밍 엔드포인트($quality) 요청 실패: $e');
+        debugPrint('[TeraBoxService] HLS 스트리밍 엔드포인트($q) 요청 실패: $e');
+      } finally {
+        client.close();
       }
     }
     return null;

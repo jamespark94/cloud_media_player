@@ -10,8 +10,10 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:provider/provider.dart';
+import '../../models/cloud_account.dart';
 import '../../models/media_item.dart';
 import '../../models/player_orientation_mode.dart';
+import '../../models/video_quality.dart';
 import '../../services/account_manager.dart';
 import '../../services/cloud_playback_sync_service.dart';
 import '../../services/cloud_service_interface.dart';
@@ -80,6 +82,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   // 하드웨어 가속 상태 관리
   bool _isHwDec = true;
 
+  // 비디오 스트리밍 화질 관리
+  VideoQuality _currentQuality = VideoQuality.autoQuality;
+  List<VideoQuality> _availableQualities = const [VideoQuality.original];
+  bool _isSwitchingQuality = false;
+
   // 제스처 기반 비디오 콘트라스트(명암비) 및 볼륨 조절 상태
   double _contrast = 0.5; // UI 레벨 0.0~1.0 (0~100, 0.5 = 원본)
   double _gestureVolume = 100.0;
@@ -97,6 +104,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   String? _currentSubtitleLanguage;
   bool _isApplyingSubtitle = false;
   Duration? _pendingSeekAfterSubtitle;
+  SubtitleTrack? _pendingInitialSubtitleTrack;
 
   // 비디오 썸네일 캡처 상태
   bool _hasCapturedThumbnail = false;
@@ -142,6 +150,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _tracksSub = _player.stream.tracks.listen((tracks) {
       if (!mounted) return;
 
+      // 0. 초기 사전 다운로드된 외부 자막이 있으면 미디어 로드 완료 시점에 확실하게 재적용
+      if (_pendingInitialSubtitleTrack != null) {
+        final trackToApply = _pendingInitialSubtitleTrack!;
+        _pendingInitialSubtitleTrack = null;
+        debugPrint('[PlayerScreen] 미디어 트랙 생성 완료 -> 초기 자막 재적용 (${trackToApply.title})');
+        _player.setSubtitleTrack(trackToApply);
+        _hasAutoSelectedSubtitle = true;
+        return;
+      }
+
       // 1. 자막 끄기 설정이면 'no' 유지
       if (_currentSubtitleType == 'none') {
         if (_player.state.track.subtitle.id != 'no') {
@@ -153,13 +171,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       // 이미 자막 트랙이 선택되었거나 로드된 경우 중복 호출 차단 (디먹서 재시작 방지)
       if (_hasAutoSelectedSubtitle) return;
 
-      // 2. 외부 자막(클라우드/로컬) 로딩 중 비디오 내장 영어 자막 노출 방지
+      // 2. 외부 자막(클라우드/로컬) 적용 상태인 경우: 해당 외부 자막이 로드되어 있으면 그대로 유지
       if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
         final activeTrack = _player.state.track.subtitle;
-        if (activeTrack.id != 'no' && !_isKoreanTrack(activeTrack)) {
-          _player.setSubtitleTrack(SubtitleTrack.no());
+        // 이미 트랙이 활성화되어 있고 사용자가 선택한 자막이면 유지
+        if (activeTrack.id != 'no') {
+          return;
         }
-        return;
       }
 
       // 3. SAMI의 KRCC 트랙이 감지되면 즉시 한국어 트랙으로 전환
@@ -299,9 +317,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       File? initialSubtitleFile;
       String? initialSubtitleName;
 
-      final tempDir = Directory.systemTemp;
       if (_currentSubtitleType == 'cloud' && _currentSubtitleId != null) {
-        final cached = File('${tempDir.path}/${_currentSubtitleId}_${_currentSubtitleName ?? ""}');
+        final cached = _getSafeSubtitleCacheFile(_currentSubtitleId!, _currentSubtitleName);
         if (cached.existsSync() && cached.lengthSync() > 0) {
           initialSubtitleFile = cached;
           initialSubtitleName = _currentSubtitleName;
@@ -351,7 +368,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           if (matchingSubs.isNotEmpty) {
             matchingSubs.sort((a, b) => SubtitleUtils.koreanScore(b.name).compareTo(SubtitleUtils.koreanScore(a.name)));
             final selectedSub = matchingSubs.first;
-            final file = File('${tempDir.path}/${selectedSub.id}_${selectedSub.name}');
+            final file = _getSafeSubtitleCacheFile(selectedSub.id, selectedSub.name);
             if (file.existsSync() && file.lengthSync() > 0) {
               initialSubtitleFile = file;
             } else {
@@ -374,16 +391,41 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         } catch (_) {}
       }
 
-      // 3. 직접 스트림 URL 및 인증 헤더 획득 (libmpv 직접 고속 스트리밍)
+      // 3. 바이두/테라박스 스트리밍:
+      // HLS(.m3u8)는 로컬 프록시를 통해 세그먼트 헤더를 주입하고,
+      // MP4 직링크(dlink)는 libmpv가 자체 캐시(64MB)로 직접 연결하여 다중 Range 병목 차단
       await widget.service.refreshTokensIfNeeded();
-      final directUrl = await widget.service.getStreamUrl(widget.item);
-      final headers = await widget.service.getStreamHeaders();
+      final qualities = await widget.service.getAvailableQualities(widget.item);
+      final defaultQuality = widget.service.getDefaultPlaybackQuality();
+      _availableQualities = qualities;
+      _currentQuality = defaultQuality;
+
+      final isBaiduOrTeraBox = widget.service.account.type == CloudType.baidu ||
+          widget.service.account.type == CloudType.terabox;
+
+      final rawStreamUrl = await widget.service.getStreamUrlWithQuality(widget.item, defaultQuality);
+      final rawHeaders = await widget.service.getStreamHeaders();
+
+      final isHls = rawStreamUrl.contains('.m3u8') ||
+          rawStreamUrl.contains('api/streaming') ||
+          rawStreamUrl.contains('method=streaming');
+      final isFallbackToOriginal = !defaultQuality.isOriginal && !isHls;
+      if (isFallbackToOriginal) {
+        _currentQuality = VideoQuality.original;
+      }
+
+      final playUrl = (isBaiduOrTeraBox && isHls)
+          ? LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: defaultQuality)
+          : rawStreamUrl;
+      final headers = (isBaiduOrTeraBox && isHls) ? <String, String>{} : rawHeaders;
+
+      debugPrint('[PlayerScreen] 스트림 오픈 시작 (isHls: $isHls, isFallback: $isFallbackToOriginal, quality: ${_currentQuality.label}): $playUrl');
 
       // 4. Media에 start: resumePos를 전달하여 첫 프레임부터 이전 위치에서 디코딩 개시!
       await _player.open(
         Media(
-          directUrl,
-          httpHeaders: headers,
+          playUrl,
+          httpHeaders: headers.isNotEmpty ? headers : null,
           start: resumePos,
         ),
         play: true,
@@ -391,11 +433,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
       _ensureAutoPlay();
 
-      // 5. 다운로드 완료된 외부 자막이 있으면 즉시 단 1회만 연결
-      if (initialSubtitleFile != null && initialSubtitleFile.existsSync()) {
-        await _player.setSubtitleTrack(
-          SubtitleTrack.uri(initialSubtitleFile.path, title: initialSubtitleName, language: _currentSubtitleLanguage ?? 'ko'),
+      if (isFallbackToOriginal) {
+        _showNotificationBanner(
+          message: '저해상도(${defaultQuality.label})를 지원하지 않아 원본으로 재생됩니다. 네트워크에 따라 버퍼링이 발생할 수 있습니다.',
+          icon: Icons.warning_amber_rounded,
+          iconColor: Colors.orangeAccent,
+          duration: const Duration(seconds: 5),
         );
+      }
+
+      // 5. 다운로드 완료된 외부 자막이 있으면 즉시 연결 및 미디어 트랙 완료 시 보장 등록
+      if (initialSubtitleFile != null && initialSubtitleFile.existsSync()) {
+        final subTrack = SubtitleTrack.uri(
+          initialSubtitleFile.path,
+          title: initialSubtitleName,
+          language: _currentSubtitleLanguage ?? 'ko',
+        );
+        _pendingInitialSubtitleTrack = subTrack;
+        await _player.setSubtitleTrack(subTrack);
         _hasAutoSelectedSubtitle = true;
         _saveCurrentPosition();
         if (mounted && initialSubtitleName != null) {
@@ -411,15 +466,28 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         _restoreOrAutoLoadSubtitle();
       }
 
-      // 6. 첫 스트림 재생 준비 감지 (최대 3초) 후 로딩 스피너 종료
+      // 6. 로딩 스피너 탈출 안전장치: duration뿐 아니라 buffering 또는 playing 상태 감지 시 즉시 로딩 해제
+      _player.stream.buffering.firstWhere((b) => !b).timeout(
+        const Duration(seconds: 2),
+        onTimeout: () => false,
+      ).then((_) {
+        if (mounted && _isLoading) setState(() => _isLoading = false);
+      });
+
+      _player.stream.playing.firstWhere((p) => p).timeout(
+        const Duration(seconds: 2),
+        onTimeout: () => false,
+      ).then((_) {
+        if (mounted && _isLoading) setState(() => _isLoading = false);
+      });
+
       try {
         final d = await _player.stream.duration.firstWhere((val) => val > Duration.zero).timeout(
-          const Duration(seconds: 3),
+          const Duration(seconds: 2),
           onTimeout: () => _totalDuration,
         );
         if (d > Duration.zero && mounted) {
           setState(() => _totalDuration = d);
-          // 안전망: 만약 Media(start: resumePos)가 적용되지 않고 0초에서 시작되었다면 1회 보정
           if (resumePos != null && !_hasResumed && _player.state.position < const Duration(seconds: 3)) {
             _hasResumed = true;
             await _player.seek(resumePos);
@@ -541,22 +609,24 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       // 1. Flutter SystemChrome 화면 회전 모드 및 ImmersiveSticky 모드 적용
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.immersiveSticky);
       await SystemChrome.setPreferredOrientations(_orientationMode.deviceOrientations);
-      // 2. Android 플랫폼 네이티브 WindowInsetsController로 시스템 상태바(시간/날짜/배터리) 완전 숨김
+      // 2. Android 플랫폼 네이티브 WindowInsetsController로 시스템 상태바(시간/날짜/배터리) 및 회전 제어
       if (Platform.isAndroid) {
         try {
           const channel = MethodChannel('com.example.cloud_media_player/window');
           await channel.invokeMethod('setFullScreen', {'enable': true});
+          await channel.invokeMethod('setOrientation', {'mode': _orientationMode.name});
         } catch (_) {}
       }
     } else {
       // 1. Flutter SystemChrome 복원
       await SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
       await SystemChrome.setPreferredOrientations(DeviceOrientation.values);
-      // 2. Android 네이티브 상태바 복원
+      // 2. Android 네이티브 상태바 및 회전 복원
       if (Platform.isAndroid) {
         try {
           const channel = MethodChannel('com.example.cloud_media_player/window');
           await channel.invokeMethod('setFullScreen', {'enable': false});
+          await channel.invokeMethod('setOrientation', {'mode': 'unspecified'});
         } catch (_) {}
       }
     }
@@ -570,6 +640,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     await mode.save();
     if (_isFullScreen && !Platform.isWindows && !Platform.isLinux && !Platform.isMacOS) {
       await SystemChrome.setPreferredOrientations(mode.deviceOrientations);
+      if (Platform.isAndroid) {
+        try {
+          const channel = MethodChannel('com.example.cloud_media_player/window');
+          await channel.invokeMethod('setOrientation', {'mode': mode.name});
+        } catch (_) {}
+      }
     }
     _showNotificationBanner(
       message: '화면 회전: ${mode.label}',
@@ -682,6 +758,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
   }
 
+  /// 클라우드 자막 ID 및 파일명에 포함된 특수문자(|, /, \ 등)를 안전하게 치환하여 로컬 캐시 파일 반환
+  File _getSafeSubtitleCacheFile(String id, String? name) {
+    final tempDir = Directory.systemTemp;
+    final safeId = id.replaceAll(RegExp(r'[\\/|:*?"<> ]'), '_');
+    final safeName = (name ?? 'subtitle').replaceAll(RegExp(r'[\\/|:*?"<> ]'), '_');
+    final subDir = Directory('${tempDir.path}/subtitles');
+    if (!subDir.existsSync()) {
+      subDir.createSync(recursive: true);
+    }
+    return File('${subDir.path}/${safeId}_$safeName');
+  }
+
   /// 자막 창 닫힌 직후 백그라운드로 안전하게 자막을 다운로드 및 적용
   Future<void> _applySelectedSubtitleAsync({
     required String type,
@@ -723,21 +811,25 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           );
         }
       } else if (type == 'cloud' && id != null) {
-        final tempDir = Directory.systemTemp;
-        final cached = File('${tempDir.path}/${id}_${name ?? ""}');
+        final cached = _getSafeSubtitleCacheFile(id, name);
         if (!cached.existsSync() || cached.lengthSync() == 0) {
           final subItem = MediaItem(id: id, name: name ?? 'subtitle', isFolder: false);
           final url = await widget.service.getStreamUrl(subItem);
           final headers = await widget.service.getStreamHeaders();
+          debugPrint('[PlayerScreen] 자막 다운로드 요청: $url');
           final res = await http.get(Uri.parse(url), headers: headers);
-          if (res.statusCode == 200) {
+          debugPrint('[PlayerScreen] 자막 응답 상태: ${res.statusCode}, 본문 길이: ${res.bodyBytes.length}');
+          if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
             await cached.writeAsBytes(res.bodyBytes);
           }
         }
         if (cached.existsSync() && cached.lengthSync() > 0) {
-          await _player.setSubtitleTrack(
-            SubtitleTrack.uri(cached.path, title: name, language: language ?? 'ko'),
-          );
+          final subTrack = SubtitleTrack.uri(cached.path, title: name, language: language ?? 'ko');
+          debugPrint('[PlayerScreen] 자막 트랙 설정 완료: ${cached.path}');
+          await _player.setSubtitleTrack(subTrack);
+          _hasAutoSelectedSubtitle = true;
+        } else {
+          debugPrint('[PlayerScreen] 자막 캐시 파일이 비어있거나 생성 실패');
         }
       } else if (type == 'track' && id != null) {
         _restoreTrackSubtitle(_player.state.tracks.subtitle);
@@ -1923,6 +2015,186 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     );
   }
 
+  /// 비디오 스트리밍 해상도(화질) 변경 처리 (재생 위치 보존)
+  Future<void> _switchQuality(VideoQuality targetQuality) async {
+    if (_currentQuality == targetQuality || _isSwitchingQuality) return;
+
+    final currentPos = _player.state.position;
+    setState(() {
+      _isSwitchingQuality = true;
+    });
+
+    _showNotificationBanner(
+      message: '해상도 전환 중 (${targetQuality.label})...',
+      icon: Icons.hd,
+      iconColor: Colors.amber,
+      duration: const Duration(seconds: 4),
+    );
+
+    try {
+      await widget.service.refreshTokensIfNeeded();
+      final isBaiduOrTeraBox = widget.service.account.type == CloudType.baidu ||
+          widget.service.account.type == CloudType.terabox;
+
+      final rawStreamUrl = await widget.service.getStreamUrlWithQuality(widget.item, targetQuality);
+      final rawHeaders = await widget.service.getStreamHeaders();
+
+      final isHls = rawStreamUrl.contains('.m3u8') ||
+          rawStreamUrl.contains('api/streaming') ||
+          rawStreamUrl.contains('method=streaming');
+      final isFallbackToOriginal = !targetQuality.isOriginal && !isHls;
+
+      final playUrl = (isBaiduOrTeraBox && isHls)
+          ? LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: targetQuality)
+          : rawStreamUrl;
+      final headers = (isBaiduOrTeraBox && isHls) ? <String, String>{} : rawHeaders;
+
+      // 자막 복원 준비
+      final activeSub = _player.state.track.subtitle;
+
+      await _player.open(
+        Media(
+          playUrl,
+          httpHeaders: headers.isNotEmpty ? headers : null,
+          start: currentPos,
+        ),
+        play: true,
+      );
+
+      _ensureAutoPlay();
+
+      setState(() {
+        _currentQuality = isFallbackToOriginal ? VideoQuality.original : targetQuality;
+      });
+
+      if (isFallbackToOriginal) {
+        _showNotificationBanner(
+          message: '선택한 화질(${targetQuality.label})을 지원하지 않아 원본으로 재생됩니다.',
+          icon: Icons.warning_amber_rounded,
+          iconColor: Colors.orangeAccent,
+          duration: const Duration(seconds: 4),
+        );
+      } else {
+        _showNotificationBanner(
+          message: '화질 전환 완료: ${targetQuality.label}',
+          icon: Icons.check_circle_outline,
+          iconColor: Colors.greenAccent,
+          duration: const Duration(seconds: 2),
+        );
+      }
+
+      // 자막 트랙 재적용
+      if (activeSub.id != 'no') {
+        try {
+          await _player.setSubtitleTrack(activeSub);
+        } catch (_) {}
+      }
+
+      if (mounted) {
+        setState(() {
+          _currentQuality = targetQuality;
+          _isSwitchingQuality = false;
+        });
+
+        _showNotificationBanner(
+          message: '화질 변경 완료: ${targetQuality.label}',
+          icon: Icons.check_circle,
+          iconColor: Colors.greenAccent,
+          duration: const Duration(seconds: 3),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isSwitchingQuality = false;
+        });
+        _showNotificationBanner(
+          message: '화질 전환 실패: $e',
+          icon: Icons.error_outline,
+          iconColor: Colors.redAccent,
+          duration: const Duration(seconds: 4),
+        );
+      }
+    }
+  }
+
+  /// 화질 선택 다이얼로그 노출
+  void _openQualityDialog() {
+    _startHideTimer();
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) {
+        return SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Padding(
+                padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+                child: Row(
+                  children: [
+                    const Icon(Icons.hd_outlined, color: Colors.blueAccent),
+                    const SizedBox(width: 10),
+                    const Text(
+                      '해상도(화질) 선택',
+                      style: TextStyle(
+                        color: Colors.white,
+                        fontSize: 18,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const Spacer(),
+                    IconButton(
+                      icon: const Icon(Icons.close, color: Colors.white70),
+                      onPressed: () => Navigator.pop(ctx),
+                    ),
+                  ],
+                ),
+              ),
+              const Divider(color: Colors.white12, height: 1),
+              ..._availableQualities.map((quality) {
+                final isSelected = quality == _currentQuality;
+                return ListTile(
+                  leading: Icon(
+                    isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                    color: isSelected ? Colors.blueAccent : Colors.white38,
+                  ),
+                  title: Text(
+                    quality.label,
+                    style: TextStyle(
+                      color: isSelected ? Colors.blueAccent : Colors.white,
+                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                    ),
+                  ),
+                  subtitle: quality.isOriginal
+                      ? const Text(
+                          '무료 계정 속도 제한으로 버퍼링이 발생할 수 있습니다.',
+                          style: TextStyle(color: Colors.white38, fontSize: 11),
+                        )
+                      : (quality == VideoQuality.q360p
+                          ? const Text(
+                              '저속 회선/무료 계정에 최적화된 빠른 시작 모드',
+                              style: TextStyle(color: Colors.white38, fontSize: 11),
+                            )
+                          : null),
+                  onTap: () {
+                    Navigator.pop(ctx);
+                    _switchQuality(quality);
+                  },
+                );
+              }),
+              const SizedBox(height: 12),
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   Widget _buildNotificationBanner() {
     if (_bannerMessage == null) return const SizedBox.shrink();
 
@@ -2052,6 +2324,36 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             icon: const Icon(Icons.subtitles, color: Colors.white),
             tooltip: '자막 설정 (SMI/SRT/다국어)',
             onPressed: _openSubtitleDialog,
+          ),
+          IconButton(
+            icon: Stack(
+              clipBehavior: Clip.none,
+              children: [
+                const Icon(Icons.hd_outlined, color: Colors.white),
+                if (_currentQuality != VideoQuality.original)
+                  Positioned(
+                    right: -4,
+                    bottom: -2,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 2, vertical: 1),
+                      decoration: BoxDecoration(
+                        color: Colors.blueAccent,
+                        borderRadius: BorderRadius.circular(3),
+                      ),
+                      child: Text(
+                        _currentQuality.id.replaceAll('p', ''),
+                        style: const TextStyle(
+                          color: Colors.white,
+                          fontSize: 8,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ),
+                  ),
+              ],
+            ),
+            tooltip: '해상도(화질) 선택: ${_currentQuality.label}',
+            onPressed: _openQualityDialog,
           ),
           if (!Platform.isWindows && !Platform.isLinux && !Platform.isMacOS)
             PopupMenuButton<PlayerOrientationMode>(

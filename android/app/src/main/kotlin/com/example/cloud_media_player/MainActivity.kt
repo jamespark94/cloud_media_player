@@ -2,6 +2,7 @@ package com.example.cloud_media_player
 
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ActivityInfo
 import android.net.Uri
 import android.os.Build
 import android.os.PowerManager
@@ -34,6 +35,24 @@ class MainActivity : FlutterActivity() {
                     val enable = call.argument<Boolean>("enable") ?: false
                     isFullScreenRequested = enable
                     applyFullScreen(enable)
+                    result.success(true)
+                }
+                "setOrientation" -> {
+                    val mode = call.argument<String>("mode") ?: "unspecified"
+                    when (mode) {
+                        "landscape" -> {
+                            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        }
+                        "portrait" -> {
+                            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_PORTRAIT
+                        }
+                        "sensor" -> {
+                            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR
+                        }
+                        else -> {
+                            requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                        }
+                    }
                     result.success(true)
                 }
                 else -> result.notImplemented()

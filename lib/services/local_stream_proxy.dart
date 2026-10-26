@@ -1,7 +1,12 @@
+import 'dart:convert';
 import 'dart:io';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'cloud_service_interface.dart';
 import '../models/media_item.dart';
+import '../models/video_quality.dart';
+import '../models/cloud_account.dart';
+import 'baidu_service.dart';
+import 'cloud_service_interface.dart';
 
 class LocalStreamProxy {
   static LocalStreamProxy? _instance;
@@ -19,7 +24,10 @@ class LocalStreamProxy {
     try {
       _server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
       _server!.listen(_handleRequest);
-    } catch (_) {}
+      debugPrint('[LocalStreamProxy] 서버 시작됨: 127.0.0.1:${_server!.port}');
+    } catch (e) {
+      debugPrint('[LocalStreamProxy] 서버 시작 실패: $e');
+    }
   }
 
   Future<void> stop() async {
@@ -29,13 +37,19 @@ class LocalStreamProxy {
   }
 
   /// 미디어 아이템에 대한 로컬 프록시 스트리밍 URL을 등록하고 반환합니다.
-  String registerStream(CloudService service, MediaItem item) {
-    final sessionId = '${item.id}_${DateTime.now().millisecondsSinceEpoch}';
-    _sessions[sessionId] = _ActiveStream(service: service, item: item);
+  String registerStream(CloudService service, MediaItem item, {VideoQuality? quality}) {
+    final sessionId = '${DateTime.now().microsecondsSinceEpoch}_${_sessions.length}';
+    _sessions[sessionId] = _ActiveStream(service: service, item: item, quality: quality);
     return 'http://127.0.0.1:${_server!.port}/stream?session=$sessionId';
   }
 
   void _handleRequest(HttpRequest request) async {
+    // 1. 하위 M3U8 또는 세그먼트(.ts) 프록시 요청 처리
+    if (request.uri.path == '/hls_segment') {
+      await _handleHlsSegment(request);
+      return;
+    }
+
     final sessionId = request.uri.queryParameters['session'];
     if (sessionId == null || !_sessions.containsKey(sessionId)) {
       request.response.statusCode = HttpStatus.notFound;
@@ -47,8 +61,12 @@ class LocalStreamProxy {
     final session = _sessions[sessionId]!;
     try {
       await session.service.refreshTokensIfNeeded();
-      final targetUrl = await session.service.getStreamUrl(session.item);
+      final targetUrl = session.quality != null
+          ? await session.service.getStreamUrlWithQuality(session.item, session.quality!)
+          : await session.service.getStreamUrl(session.item);
       final headers = await session.service.getStreamHeaders();
+
+      debugPrint('[LocalStreamProxy] 스트림 요청: $targetUrl');
 
       final client = http.Client();
       final method = request.method == 'HEAD' ? 'HEAD' : 'GET';
@@ -56,6 +74,10 @@ class LocalStreamProxy {
 
       // 헤더 포워딩
       headers.forEach((k, v) => proxyReq.headers[k] = v);
+      // /api/streaming 은 URL 획득 시와 동일한 UA 필요 (Baidu는 PCS UA와 다름)
+      if (targetUrl.contains('api/streaming') && session.service.account.type == CloudType.baidu) {
+        proxyReq.headers['User-Agent'] = BaiduService.defaultUserAgent;
+      }
 
       final clientRange = request.headers.value(HttpHeaders.rangeHeader);
       if (clientRange != null) {
@@ -63,6 +85,31 @@ class LocalStreamProxy {
       }
 
       final proxyRes = await client.send(proxyReq);
+
+      // M3U8 플레이리스트인 경우: 내부 하위 URL들을 로컬 프록시 주소로 재작성(Rewrite)
+      final rawContentType = proxyRes.headers['content-type'] ?? '';
+      final isM3u8 = targetUrl.contains('.m3u8') ||
+          targetUrl.contains('api/streaming') ||
+          targetUrl.contains('method=streaming') ||
+          rawContentType.contains('mpegurl');
+
+      if (isM3u8 && proxyRes.statusCode == 200 && method != 'HEAD') {
+        final bodyBytes = await proxyRes.stream.toBytes();
+        final bodyStr = utf8.decode(bodyBytes, allowMalformed: true);
+
+        if (bodyStr.contains('#EXTM3U')) {
+          final targetUri = Uri.parse(targetUrl);
+          final rewritten = _rewriteM3u8(bodyStr, targetUri, sessionId);
+
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers.set(HttpHeaders.contentTypeHeader, 'application/vnd.apple.mpegurl');
+          request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+          request.response.write(rewritten);
+          await request.response.close();
+          client.close();
+          return;
+        }
+      }
 
       // 클라이언트 응답 헤더 세팅
       request.response.statusCode = proxyRes.statusCode;
@@ -74,7 +121,7 @@ class LocalStreamProxy {
       final contentType = proxyRes.headers['content-type'];
       if (contentType != null && contentType.isNotEmpty) {
         request.response.headers.set(HttpHeaders.contentTypeHeader, contentType);
-      } else if (targetUrl.contains('.m3u8') || targetUrl.contains('api/streaming')) {
+      } else if (isM3u8) {
         request.response.headers.set(HttpHeaders.contentTypeHeader, 'application/vnd.apple.mpegurl');
       } else {
         request.response.headers.set(HttpHeaders.contentTypeHeader, 'video/mp4');
@@ -86,7 +133,7 @@ class LocalStreamProxy {
         request.response.headers.set(HttpHeaders.contentRangeHeader, contentRange);
       }
 
-      // 4. Content-Length 설정 (chunked encoding 방지하여 mpv가 재생 길이를 정상 인식하도록 함)
+      // 4. Content-Length 설정
       if (proxyRes.contentLength != null && proxyRes.contentLength! >= 0) {
         request.response.contentLength = proxyRes.contentLength!;
       }
@@ -100,8 +147,118 @@ class LocalStreamProxy {
       await request.response.close();
       client.close();
     } catch (e) {
+      debugPrint('[LocalStreamProxy] 스트림 에러: $e');
       try {
         request.response.statusCode = HttpStatus.internalServerError;
+        await request.response.close();
+      } catch (_) {}
+    }
+  }
+
+  /// M3U8 플레이리스트 내의 세그먼트/서브 m3u8 URL을 로컬 프록시 주소로 변환
+  String _rewriteM3u8(String m3u8Content, Uri baseUri, String sessionId) {
+    final lines = m3u8Content.split('\n');
+    final output = <String>[];
+
+    for (var line in lines) {
+      final trimmed = line.trim();
+      if (trimmed.isEmpty) {
+        output.add(line);
+        continue;
+      }
+      if (trimmed.startsWith('#')) {
+        // #EXT-X-KEY:METHOD=...,URI="..." 처리
+        if (trimmed.startsWith('#EXT-X-KEY:')) {
+          final uriMatch = RegExp(r'URI="([^"]+)"').firstMatch(trimmed);
+          if (uriMatch != null) {
+            final keyUriStr = uriMatch.group(1)!;
+            final resolvedKeyUri = baseUri.resolve(keyUriStr).toString();
+            final proxiedKeyUri = 'http://127.0.0.1:${_server!.port}/hls_segment?session=$sessionId&url=${Uri.encodeComponent(resolvedKeyUri)}';
+            line = line.replaceFirst(keyUriStr, proxiedKeyUri);
+          }
+        }
+        output.add(line);
+      } else {
+        // 상대 경로 또는 절대 경로 URL을 절대 URL로 정규화 후 로컬 프록시로 감쌈
+        final resolvedUri = baseUri.resolve(trimmed).toString();
+        final proxiedUrl = 'http://127.0.0.1:${_server!.port}/hls_segment?session=$sessionId&url=${Uri.encodeComponent(resolvedUri)}';
+        output.add(proxiedUrl);
+      }
+    }
+
+    return output.join('\n');
+  }
+
+  /// HLS 개별 청크(.ts) 또는 키 파일 요청을 올바른 인증 헤더와 함께 원본 서버로 전달
+  Future<void> _handleHlsSegment(HttpRequest request) async {
+    final sessionId = request.uri.queryParameters['session'];
+    final rawUrl = request.uri.queryParameters['url'];
+
+    if (sessionId == null || rawUrl == null || !_sessions.containsKey(sessionId)) {
+      request.response.statusCode = HttpStatus.notFound;
+      await request.response.close();
+      return;
+    }
+
+    final session = _sessions[sessionId]!;
+    try {
+      final headers = await session.service.getStreamHeaders();
+      final client = http.Client();
+      final proxyReq = http.Request(request.method, Uri.parse(rawUrl));
+
+      headers.forEach((k, v) => proxyReq.headers[k] = v);
+
+      final clientRange = request.headers.value(HttpHeaders.rangeHeader);
+      if (clientRange != null) {
+        proxyReq.headers[HttpHeaders.rangeHeader] = clientRange;
+      }
+
+      final proxyRes = await client.send(proxyReq);
+
+      // 하위 m3u8 플레이리스트면 세그먼트 URL도 프록시로 재작성
+      final ct = proxyRes.headers['content-type'] ?? '';
+      if (request.method != 'HEAD' &&
+          proxyRes.statusCode == 200 &&
+          (rawUrl.contains('.m3u8') ||
+              rawUrl.contains('api/streaming') ||
+              rawUrl.contains('method=streaming') ||
+              ct.contains('mpegurl'))) {
+        final bytes = await proxyRes.stream.toBytes();
+        final text = utf8.decode(bytes, allowMalformed: true);
+        if (text.trimLeft().startsWith('#EXTM3U')) {
+          request.response.statusCode = HttpStatus.ok;
+          request.response.headers.set(HttpHeaders.contentTypeHeader, 'application/vnd.apple.mpegurl');
+          request.response.headers.set(HttpHeaders.cacheControlHeader, 'no-cache');
+          request.response.write(_rewriteM3u8(text, Uri.parse(rawUrl), sessionId));
+          await request.response.close();
+          client.close();
+          return;
+        }
+        request.response.statusCode = proxyRes.statusCode;
+        if (ct.isNotEmpty) request.response.headers.set(HttpHeaders.contentTypeHeader, ct);
+        request.response.add(bytes);
+        await request.response.close();
+        client.close();
+        return;
+      }
+
+      request.response.statusCode = proxyRes.statusCode;
+      const skip = {'transfer-encoding', 'content-encoding', 'connection'};
+      proxyRes.headers.forEach((k, v) {
+        if (!skip.contains(k.toLowerCase())) {
+          request.response.headers.set(k, v);
+        }
+      });
+
+      if (request.method != 'HEAD') {
+        await request.response.addStream(proxyRes.stream);
+      }
+      await request.response.close();
+      client.close();
+    } catch (e) {
+      debugPrint('[LocalStreamProxy] HLS 세그먼트 전달 실패: $e');
+      try {
+        request.response.statusCode = HttpStatus.badGateway;
         await request.response.close();
       } catch (_) {}
     }
@@ -111,5 +268,7 @@ class LocalStreamProxy {
 class _ActiveStream {
   final CloudService service;
   final MediaItem item;
-  _ActiveStream({required this.service, required this.item});
+  final VideoQuality? quality;
+  _ActiveStream({required this.service, required this.item, this.quality});
 }
+

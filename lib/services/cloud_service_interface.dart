@@ -2,6 +2,7 @@ import 'dart:typed_data';
 import 'package:http/http.dart' as http;
 import '../models/cloud_account.dart';
 import '../models/media_item.dart';
+import '../models/video_quality.dart';
 
 abstract class CloudService {
   final CloudAccount account;
@@ -14,6 +15,17 @@ abstract class CloudService {
 
   /// 영상/파일 스트리밍 또는 직접 다운로드를 위한 접근 URL을 반환합니다.
   Future<String> getStreamUrl(MediaItem item);
+
+  /// 특정 화질 스트림 URL을 요청합니다 (미지원 시 getStreamUrl로 폴백).
+  Future<String> getStreamUrlWithQuality(MediaItem item, VideoQuality quality) async => getStreamUrl(item);
+
+  /// 지원하는 화질 목록을 반환합니다. (기본값: 원본만 지원)
+  Future<List<VideoQuality>> getAvailableQualities(MediaItem item) async => const [
+    VideoQuality.original,
+  ];
+
+  /// 기본 재생 시작 권장 화질을 반환합니다.
+  VideoQuality getDefaultPlaybackQuality() => VideoQuality.original;
 
   /// 스트리밍/다운로드 요청 시 필요한 인증 헤더 (예: Authorization Bearer)
   Future<Map<String, String>> getStreamHeaders();
