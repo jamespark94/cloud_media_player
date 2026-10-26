@@ -52,6 +52,8 @@ dependencies:
   audio_session: ^0.1.25
   screen_brightness: ^2.1.11
   flutter_volume_controller: ^2.0.2
+  fast_gbk: ^1.0.0
+  charset_converter: ^2.5.1
 
 dev_dependencies:
   flutter_test:

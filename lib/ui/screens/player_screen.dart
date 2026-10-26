@@ -171,13 +171,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       // 이미 자막 트랙이 선택되었거나 로드된 경우 중복 호출 차단 (디먹서 재시작 방지)
       if (_hasAutoSelectedSubtitle) return;
 
-      // 2. 외부 자막(클라우드/로컬) 적용 상태인 경우: 해당 외부 자막이 로드되어 있으면 그대로 유지
+      // 2. 외부 자막(클라우드/로컬) 적용 상태인 경우: 내장 트랙 자동 선택 방지
       if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
-        final activeTrack = _player.state.track.subtitle;
-        // 이미 트랙이 활성화되어 있고 사용자가 선택한 자막이면 유지
-        if (activeTrack.id != 'no') {
-          return;
-        }
+        return;
       }
 
       // 3. SAMI의 KRCC 트랙이 감지되면 즉시 한국어 트랙으로 전환
@@ -341,12 +337,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               isFolder: false,
             );
 
-            final url = await widget.service.getStreamUrl(subToDownload);
-            final headers = await widget.service.getStreamHeaders();
-            final res = await http.get(Uri.parse(url), headers: headers);
-            if (res.statusCode == 200) {
-              await cached.writeAsBytes(res.bodyBytes);
-              initialSubtitleFile = cached;
+            final downloadedFile = await _downloadAndNormalizeSubtitle(subToDownload, targetFile: cached);
+            if (downloadedFile != null && downloadedFile.existsSync() && downloadedFile.lengthSync() > 0) {
+              initialSubtitleFile = downloadedFile;
               initialSubtitleName = _currentSubtitleName ?? subToDownload.name;
               _currentSubtitleId = subToDownload.id;
             }
@@ -368,19 +361,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           if (matchingSubs.isNotEmpty) {
             matchingSubs.sort((a, b) => SubtitleUtils.koreanScore(b.name).compareTo(SubtitleUtils.koreanScore(a.name)));
             final selectedSub = matchingSubs.first;
-            final file = _getSafeSubtitleCacheFile(selectedSub.id, selectedSub.name);
-            if (file.existsSync() && file.lengthSync() > 0) {
-              initialSubtitleFile = file;
-            } else {
-              final url = await widget.service.getStreamUrl(selectedSub);
-              final headers = await widget.service.getStreamHeaders();
-              final res = await http.get(Uri.parse(url), headers: headers);
-              if (res.statusCode == 200) {
-                await file.writeAsBytes(res.bodyBytes);
-                initialSubtitleFile = file;
-              }
-            }
-            if (initialSubtitleFile != null) {
+            final downloadedFile = await _downloadAndNormalizeSubtitle(selectedSub);
+            if (downloadedFile != null && downloadedFile.existsSync() && downloadedFile.lengthSync() > 0) {
+              initialSubtitleFile = downloadedFile;
               initialSubtitleName = selectedSub.name;
               _currentSubtitleType = 'cloud';
               _currentSubtitleId = selectedSub.id;
@@ -770,6 +753,42 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     return File('${subDir.path}/${safeId}_$safeName');
   }
 
+  /// 클라우드 자막 파일을 안전하게 다운로드하고, CP949/EUC-KR 등을 UTF-8로 자동 변환하여 캐시 저장
+  Future<File?> _downloadAndNormalizeSubtitle(MediaItem subItem, {File? targetFile}) async {
+    final cached = targetFile ?? _getSafeSubtitleCacheFile(subItem.id, subItem.name);
+    if (cached.existsSync() && cached.lengthSync() > 10) {
+      return cached;
+    }
+
+    try {
+      final url = await widget.service.getStreamUrl(subItem);
+      final headers = await widget.service.getStreamHeaders();
+      debugPrint('[PlayerScreen] 자막 다운로드 요청 시작: ${subItem.name} ($url)');
+
+      final res = await http.get(Uri.parse(url), headers: headers);
+      debugPrint('[PlayerScreen] 자막 응답 상태: ${res.statusCode}, 바이트 크기: ${res.bodyBytes.length}');
+
+      if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+        final bytes = res.bodyBytes;
+        // HTML 에러 페이지(403, 404 등)가 200 OK로 반환되는 경우 방지
+        final sample = String.fromCharCodes(bytes.take(200)).toLowerCase();
+        if (sample.contains('<!doctype html') || (sample.contains('<html') && !sample.contains('<sami'))) {
+          debugPrint('[PlayerScreen] 자막 다운로드 결과가 HTML 에러 페이지입니다. 저장 생략.');
+          return null;
+        }
+
+        // CP949 / EUC-KR / GBK -> UTF-8 트랜스코딩
+        final normalizedBytes = await SubtitleUtils.normalizeSubtitleToUtf8Bytes(bytes);
+        await cached.writeAsBytes(normalizedBytes);
+        debugPrint('[PlayerScreen] 자막 UTF-8 변환 및 캐시 완료: ${cached.path} (${normalizedBytes.length} bytes)');
+        return cached;
+      }
+    } catch (e) {
+      debugPrint('[PlayerScreen] 자막 다운로드/변환 실패: $e');
+    }
+    return null;
+  }
+
   /// 자막 창 닫힌 직후 백그라운드로 안전하게 자막을 다운로드 및 적용
   Future<void> _applySelectedSubtitleAsync({
     required String type,
@@ -811,25 +830,15 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           );
         }
       } else if (type == 'cloud' && id != null) {
-        final cached = _getSafeSubtitleCacheFile(id, name);
-        if (!cached.existsSync() || cached.lengthSync() == 0) {
-          final subItem = MediaItem(id: id, name: name ?? 'subtitle', isFolder: false);
-          final url = await widget.service.getStreamUrl(subItem);
-          final headers = await widget.service.getStreamHeaders();
-          debugPrint('[PlayerScreen] 자막 다운로드 요청: $url');
-          final res = await http.get(Uri.parse(url), headers: headers);
-          debugPrint('[PlayerScreen] 자막 응답 상태: ${res.statusCode}, 본문 길이: ${res.bodyBytes.length}');
-          if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
-            await cached.writeAsBytes(res.bodyBytes);
-          }
-        }
-        if (cached.existsSync() && cached.lengthSync() > 0) {
+        final subItem = MediaItem(id: id, name: name ?? 'subtitle', isFolder: false);
+        final cached = await _downloadAndNormalizeSubtitle(subItem);
+        if (cached != null && cached.existsSync() && cached.lengthSync() > 0) {
           final subTrack = SubtitleTrack.uri(cached.path, title: name, language: language ?? 'ko');
           debugPrint('[PlayerScreen] 자막 트랙 설정 완료: ${cached.path}');
           await _player.setSubtitleTrack(subTrack);
           _hasAutoSelectedSubtitle = true;
         } else {
-          debugPrint('[PlayerScreen] 자막 캐시 파일이 비어있거나 생성 실패');
+          debugPrint('[PlayerScreen] 자막 다운로드/캐시 파일이 비어있거나 생성 실패');
         }
       } else if (type == 'track' && id != null) {
         _restoreTrackSubtitle(_player.state.tracks.subtitle);
@@ -919,22 +928,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       // 최상위 후보부터 다운로드 및 검증
       for (final candidate in matchingSubs) {
         try {
-          final url = await widget.service.getStreamUrl(candidate);
-          final headers = await widget.service.getStreamHeaders();
-          final res = await http.get(Uri.parse(url), headers: headers);
-
-          if (res.statusCode == 200) {
-            final tempDir = Directory.systemTemp;
-            final file = File('${tempDir.path}/${candidate.id}_${candidate.name}');
-            await file.writeAsBytes(res.bodyBytes);
-
+          final downloaded = await _downloadAndNormalizeSubtitle(candidate);
+          if (downloaded != null && downloaded.existsSync() && downloaded.lengthSync() > 0) {
             final score = SubtitleUtils.koreanScore(candidate.name);
-            final hasKorean = SubtitleUtils.hasKoreanContent(res.bodyBytes);
+            final bytes = await downloaded.readAsBytes();
+            final hasKorean = SubtitleUtils.hasKoreanContent(bytes);
 
             // 파일명에 한국어 표기가 있거나 내용에 한글/KRCC가 포함된 경우 채택
             if (score >= 50 || hasKorean || selectedSub == null) {
               selectedSub = candidate;
-              localSubFile = file;
+              localSubFile = downloaded;
               break;
             }
           }
@@ -1039,18 +1042,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       subItem ??= MediaItem(id: cloudId, name: cloudName ?? 'subtitle', parentId: parentId, isFolder: false);
 
       if (subItem.id.isNotEmpty) {
-        final url = await widget.service.getStreamUrl(subItem);
-        final headers = await widget.service.getStreamHeaders();
-        final res = await http.get(Uri.parse(url), headers: headers);
-
-        if (res.statusCode == 200) {
-          final tempDir = Directory.systemTemp;
-          final localSubFile = File('${tempDir.path}/${subItem.id}_${subItem.name}');
-          await localSubFile.writeAsBytes(res.bodyBytes);
-
+        final downloadedFile = await _downloadAndNormalizeSubtitle(subItem);
+        if (downloadedFile != null && downloadedFile.existsSync() && downloadedFile.lengthSync() > 0) {
           if (!mounted) return;
           await _player.setSubtitleTrack(
-            SubtitleTrack.uri(localSubFile.path, title: subItem.name, language: lang ?? 'ko'),
+            SubtitleTrack.uri(downloadedFile.path, title: subItem.name, language: lang ?? 'ko'),
           );
           _hasAutoSelectedSubtitle = true;
           _currentSubtitleType = 'cloud';
