@@ -153,10 +153,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       // 0. 초기 사전 다운로드된 외부 자막이 있으면 미디어 로드 완료 시점에 확실하게 재적용
       if (_pendingInitialSubtitleTrack != null) {
         final trackToApply = _pendingInitialSubtitleTrack!;
-        _pendingInitialSubtitleTrack = null;
         debugPrint('[PlayerScreen] 미디어 트랙 생성 완료 -> 초기 자막 재적용 (${trackToApply.title})');
         _player.setSubtitleTrack(trackToApply);
         _hasAutoSelectedSubtitle = true;
+        // 미디어 트랙 생성 직후 mpv 내부 비동기 sid 갱신 완료를 위해 약간의 시차 후 1회 더 보장 적용
+        Future.delayed(const Duration(milliseconds: 300), () {
+          if (!mounted) return;
+          if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
+            _player.setSubtitleTrack(trackToApply);
+          }
+        });
+        _pendingInitialSubtitleTrack = null;
         return;
       }
 
@@ -436,6 +443,14 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         await _player.setSubtitleTrack(subTrack);
         _hasAutoSelectedSubtitle = true;
         _saveCurrentPosition();
+
+        // libmpv 스트림 디먹싱 완료 후 SRT 자막 트랙 연결이 풀리지 않도록 500ms 후 확정 재적용
+        Future.delayed(const Duration(milliseconds: 500), () {
+          if (!mounted) return;
+          if (_currentSubtitleType == 'cloud' || _currentSubtitleType == 'local') {
+            _player.setSubtitleTrack(subTrack);
+          }
+        });
         if (mounted && initialSubtitleName != null) {
           final isRestored = _currentSubtitleType != null;
           _showNotificationBanner(

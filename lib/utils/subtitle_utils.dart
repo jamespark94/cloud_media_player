@@ -57,11 +57,9 @@ class SubtitleUtils {
       score += 100;
     }
 
-    // 한국에서 가장 보편적으로 쓰이는 자막 형식인 .smi 우선 가중치
-    if (lower.endsWith('.smi')) {
+    // 표준 자막 포맷 우선 가중치 (SRT 및 SMI 동등 우선)
+    if (lower.endsWith('.srt') || lower.endsWith('.smi')) {
       score += 50;
-    } else if (lower.endsWith('.srt')) {
-      score += 30;
     }
 
     // 타 언어 (영어, 일어, 중국어 등) 명시된 경우 감점
