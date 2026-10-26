@@ -1,4 +1,5 @@
-﻿import 'package:url_launcher/url_launcher.dart';
+import 'package:url_launcher/url_launcher.dart';
+import '../../services/baidu_service.dart';
 import '../../services/terabox_service.dart';
 import 'dart:async';
 import 'dart:io';
@@ -44,6 +45,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   final TextEditingController _webDavPasswordController = TextEditingController();
   final TextEditingController _teraBoxCookieController = TextEditingController();
   final TextEditingController _teraBoxNameController = TextEditingController(text: 'TeraBox');
+  final TextEditingController _baiduCookieController = TextEditingController();
+  final TextEditingController _baiduNameController = TextEditingController(text: 'Baidu Netdisk');
 
 
   // Manual OAuth URL/Code Fallback
@@ -79,6 +82,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     _webDavPasswordController.dispose();
     _teraBoxCookieController.dispose();
     _teraBoxNameController.dispose();
+    _baiduCookieController.dispose();
+    _baiduNameController.dispose();
     _manualUrlController.dispose();
     super.dispose();
   }
@@ -132,6 +137,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         await _saveWebDav();
       } else if (_selectedType == CloudType.terabox) {
         await _saveTeraBox();
+      } else if (_selectedType == CloudType.baidu) {
+        await _saveBaidu();
       }
       if (mounted) {
         Navigator.pop(context, true);
@@ -419,6 +426,53 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     }
   }
 
+  Future<void> _saveBaidu() async {
+    final rawCookie = _baiduCookieController.text.trim();
+    if (rawCookie.isEmpty) {
+      throw Exception('바이두 BDUSS 쿠키를 입력해주세요.');
+    }
+
+    final bduss = BaiduService.normalizeBaiduCookie(rawCookie);
+    if (bduss.isEmpty) {
+      throw Exception('유효한 BDUSS 쿠키 값을 찾을 수 없습니다.');
+    }
+
+    setState(() {
+      _statusMessage = '바이두 계정 유효성을 확인하고 있습니다...';
+    });
+
+    final tempAccount = CloudAccount(
+      id: 'baidu_${DateTime.now().millisecondsSinceEpoch}',
+      name: _baiduNameController.text.trim().isNotEmpty
+          ? _baiduNameController.text.trim()
+          : 'Baidu Netdisk',
+      type: CloudType.baidu,
+      email: '',
+      accessToken: bduss,
+    );
+
+    final service = BaiduService(tempAccount);
+    final result = await service.verifyAccount();
+
+    if (!result.isValid) {
+      throw Exception(result.error ?? '바이두 연결 검증에 실패했습니다.');
+    }
+
+    final finalAccount = CloudAccount(
+      id: tempAccount.id,
+      name: tempAccount.name,
+      type: CloudType.baidu,
+      email: result.username ?? 'Baidu User',
+      accessToken: bduss,
+      refreshToken: tempAccount.refreshToken,
+      tokenExpiry: tempAccount.tokenExpiry,
+    );
+
+    if (mounted) {
+      await context.read<AccountManager>().saveAccount(finalAccount);
+    }
+  }
+
   Future<void> _saveWebDav() async {
     final url = _webDavUrlController.text.trim();
     if (url.isEmpty) throw Exception('WebDAV URL을 입력해주세요.');
@@ -534,6 +588,14 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
           icon: Icons.cloud_circle_outlined,
           iconColor: Colors.cyanAccent,
         ),
+        const SizedBox(height: 8),
+        _buildServiceTile(
+          type: CloudType.baidu,
+          title: 'Baidu Netdisk (바이두)',
+          subtitle: '바이두 클라우드 동영상 스트리밍 (BDUSS 쿠키 연결)',
+          icon: Icons.cloud_done_outlined,
+          iconColor: Colors.blueAccent,
+        ),
       ],
     );
   }
@@ -631,6 +693,11 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         title = 'TeraBox 연결';
         icon = Icons.cloud_circle_outlined;
         iconColor = Colors.cyanAccent;
+        break;
+      case CloudType.baidu:
+        title = 'Baidu Netdisk 연결';
+        icon = Icons.cloud_done_outlined;
+        iconColor = Colors.blueAccent;
         break;
       default:
         title = '클라우드 연결';
@@ -877,6 +944,83 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                 label: const Text('계정 확인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.cyan.shade700,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ] else if (type == CloudType.baidu) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.blueAccent.withAlpha(20),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.blueAccent.withAlpha(70)),
+              ),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: const [
+                      Icon(Icons.info_outline, size: 18, color: Colors.blueAccent),
+                      SizedBox(width: 8),
+                      Text(
+                        '바이두 BDUSS 쿠키 확인 방법',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.blueAccent),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 8),
+                  const Text(
+                    '1. PC 브라우저에서 pan.baidu.com 에 로그인합니다.\n'
+                    '2. F12 (개발자 도구) → [Application] (또는 저장용량) → [Cookies] → [https://pan.baidu.com] 클릭\n'
+                    '3. 이름 목록 중 "BDUSS" 항목의 Value 값을 복사하여 아래에 붙여넣습니다.\n'
+                    '   (전체 Cookie 헤더 문자열이나 STOKEN이 포함된 값을 그대로 붙여넣어도 자동 추출됩니다)',
+                    style: TextStyle(fontSize: 11, color: Colors.white70, height: 1.45),
+                  ),
+                  const SizedBox(height: 8),
+                  OutlinedButton.icon(
+                    onPressed: () => launchUrl(Uri.parse('https://pan.baidu.com/')),
+                    icon: const Icon(Icons.open_in_new, size: 14),
+                    label: const Text('웹 브라우저로 Baidu 열기', style: TextStyle(fontSize: 12)),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.blueAccent,
+                      side: const BorderSide(color: Colors.blueAccent),
+                      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+                      visualDensity: VisualDensity.compact,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _baiduNameController,
+              decoration: const InputDecoration(
+                labelText: '계정 표시 이름',
+                hintText: '예: 내 바이두 클라우드',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _baiduCookieController,
+              maxLines: 2,
+              decoration: const InputDecoration(
+                labelText: 'BDUSS 쿠키 값 (필수) *',
+                hintText: 'BDUSS=xxxx... 또는 xxxx...',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: ElevatedButton.icon(
+                onPressed: _startOAuth,
+                icon: const Icon(Icons.check_circle_outline),
+                label: const Text('계정 확인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.blueAccent.shade700,
                   foregroundColor: Colors.white,
                 ),
               ),

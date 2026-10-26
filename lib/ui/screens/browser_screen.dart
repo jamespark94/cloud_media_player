@@ -1285,6 +1285,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     final thumbUrl = item.thumbnailUrl ?? record?.thumbnailUrl;
     if (thumbUrl != null && thumbUrl.isNotEmpty) {
       final isTeraBox = widget.account.type == CloudType.terabox;
+      final isBaidu = widget.account.type == CloudType.baidu;
       return Image.network(
         thumbUrl,
         headers: isTeraBox
@@ -1293,7 +1294,15 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 'Cookie': 'ndus=${widget.account.accessToken.trim()}',
                 'Referer': 'https://www.terabox.com/',
               }
-            : null,
+            : isBaidu
+                ? {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Cookie': widget.account.accessToken.contains('=')
+                        ? widget.account.accessToken.trim()
+                        : 'BDUSS=${widget.account.accessToken.trim()}',
+                    'Referer': 'https://pan.baidu.com/',
+                  }
+                : null,
         width: width,
         height: height,
         fit: BoxFit.cover,
@@ -2417,6 +2426,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
       case CloudType.terabox:
         icon = Icons.cloud_circle_outlined;
         color = Colors.cyanAccent;
+        break;
+      case CloudType.baidu:
+        icon = Icons.cloud_done_outlined;
+        color = Colors.blueAccent;
         break;
     }
     return Icon(icon, color: color, size: 20);

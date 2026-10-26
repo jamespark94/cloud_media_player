@@ -1,3 +1,4 @@
+import 'baidu_service.dart';
 import 'terabox_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -112,6 +113,8 @@ class AccountManager extends ChangeNotifier {
         return DropboxService(account, onAccountUpdated: saveAccount);
       case CloudType.terabox:
         return TeraBoxService(account, onAccountUpdated: saveAccount);
+      case CloudType.baidu:
+        return BaiduService(account, onAccountUpdated: saveAccount);
     }
   }
 }

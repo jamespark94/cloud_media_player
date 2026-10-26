@@ -756,11 +756,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           'Cookie': 'ndus=${account.accessToken.trim()}',
           'Referer': 'https://www.terabox.com/',
         };
-      } else if (account != null && account.type == CloudType.terabox && account.accessToken.isNotEmpty) {
+      } else if (account != null && account.type == CloudType.baidu && account.accessToken.isNotEmpty) {
         headers = {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Cookie': 'ndus=${account.accessToken.trim()}',
-          'Referer': 'https://www.terabox.com/',
+          'Cookie': account.accessToken.contains('=') ? account.accessToken.trim() : 'BDUSS=${account.accessToken.trim()}',
+          'Referer': 'https://pan.baidu.com/',
         };
       }
       return _buildThumbnailNetworkImage(record.thumbnailUrl!, headers, isFinished);
@@ -852,11 +852,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           'Cookie': 'ndus=${account.accessToken.trim()}',
           'Referer': 'https://www.terabox.com/',
         };
-      } else if (account != null && account.type == CloudType.terabox && account.accessToken.isNotEmpty) {
+      } else if (account != null && account.type == CloudType.baidu && account.accessToken.isNotEmpty) {
         headers = {
           'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-          'Cookie': 'ndus=${account.accessToken.trim()}',
-          'Referer': 'https://www.terabox.com/',
+          'Cookie': account.accessToken.contains('=') ? account.accessToken.trim() : 'BDUSS=${account.accessToken.trim()}',
+          'Referer': 'https://pan.baidu.com/',
         };
       }
       return Image.network(
@@ -1986,6 +1986,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         icon = Icons.cloud_circle_outlined;
         color = Colors.cyanAccent;
         break;
+      case CloudType.baidu:
+        icon = Icons.cloud_done_outlined;
+        color = Colors.blueAccent;
+        break;
     }
     return Icon(icon, size: 13, color: color);
   }
@@ -2021,6 +2025,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       case CloudType.terabox:
         icon = Icons.cloud_circle_outlined;
         color = Colors.cyanAccent;
+        break;
+      case CloudType.baidu:
+        icon = Icons.cloud_done_outlined;
+        color = Colors.blueAccent;
         break;
     }
     return Container(
@@ -2066,6 +2074,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         icon = Icons.cloud_circle_outlined;
         color = Colors.cyanAccent;
         break;
+      case CloudType.baidu:
+        icon = Icons.cloud_done_outlined;
+        color = Colors.blueAccent;
+        break;
     }
 
     return Container(
@@ -2094,6 +2106,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return 'WebDAV / NAS';
       case CloudType.terabox:
         return 'TeraBox';
+      case CloudType.baidu:
+        return 'Baidu Netdisk';
     }
   }
 
