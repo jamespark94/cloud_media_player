@@ -799,15 +799,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
 
     try {
-      final url = await widget.service.getStreamUrl(subItem);
-      final headers = await widget.service.getStreamHeaders();
-      debugPrint('[PlayerScreen] 자막 다운로드 요청 시작: ${subItem.name} ($url)');
+      debugPrint('[PlayerScreen] 자막 다운로드 요청 시작: ${subItem.name} (id: ${subItem.id})');
+      Uint8List bytes;
+      if (widget.service.account.type == CloudType.mega) {
+        bytes = await widget.service.downloadBytes(subItem);
+      } else {
+        final url = await widget.service.getStreamUrl(subItem);
+        final headers = await widget.service.getStreamHeaders();
+        final res = await http.get(Uri.parse(url), headers: headers);
+        debugPrint('[PlayerScreen] 자막 응답 상태: ${res.statusCode}, 바이트 크기: ${res.bodyBytes.length}');
+        if (res.statusCode != 200 || res.bodyBytes.isEmpty) {
+          return null;
+        }
+        bytes = res.bodyBytes;
+      }
 
-      final res = await http.get(Uri.parse(url), headers: headers);
-      debugPrint('[PlayerScreen] 자막 응답 상태: ${res.statusCode}, 바이트 크기: ${res.bodyBytes.length}');
-
-      if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
-        final bytes = res.bodyBytes;
+      if (bytes.isNotEmpty) {
         final sample = String.fromCharCodes(bytes.take(200)).trim().toLowerCase();
         // HTML 에러 페이지(403, 404 등)가 200 OK로 반환되는 경우 방지
         if (sample.contains('<!doctype html') || (sample.contains('<html') && !sample.contains('<sami'))) {
