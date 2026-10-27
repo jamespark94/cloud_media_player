@@ -2435,6 +2435,10 @@ class _BrowserScreenState extends State<BrowserScreen> {
         icon = Icons.cloud_queue_rounded;
         color = Colors.green;
         break;
+      case CloudType.mega:
+        icon = Icons.lock_outline_rounded;
+        color = Colors.redAccent;
+        break;
     }
     return Icon(icon, color: color, size: 20);
   }

@@ -1,3 +1,4 @@
+import 'mega_service.dart';
 import 'dart:convert';
 import 'dart:io';
 import 'package:flutter/foundation.dart';
@@ -59,6 +60,10 @@ class LocalStreamProxy {
     }
 
     final session = _sessions[sessionId]!;
+    if (session.service is MegaService) {
+      await _handleMegaStream(request, session.service as MegaService, session.item);
+      return;
+    }
     try {
       await session.service.refreshTokensIfNeeded();
       final targetUrl = session.quality != null
@@ -259,6 +264,68 @@ class LocalStreamProxy {
       debugPrint('[LocalStreamProxy] HLS 세그먼트 전달 실패: $e');
       try {
         request.response.statusCode = HttpStatus.badGateway;
+        await request.response.close();
+      } catch (_) {}
+    }
+  }
+
+  Future<void> _handleMegaStream(HttpRequest request, MegaService megaService, MediaItem item) async {
+    try {
+      final method = request.method;
+      final rangeHeader = request.headers.value(HttpHeaders.rangeHeader);
+      int? start;
+      int? end;
+
+      final totalSize = item.size ?? 0;
+
+      if (rangeHeader != null && rangeHeader.startsWith('bytes=')) {
+        final parts = rangeHeader.substring(6).split('-');
+        if (parts.isNotEmpty && parts[0].isNotEmpty) {
+          start = int.tryParse(parts[0]);
+        }
+        if (parts.length > 1 && parts[1].isNotEmpty) {
+          end = int.tryParse(parts[1]);
+        }
+      }
+
+      final actualStart = start ?? 0;
+      final actualEnd = (end != null && end < totalSize) ? end : (totalSize > 0 ? totalSize - 1 : null);
+      final contentLength = actualEnd != null ? (actualEnd - actualStart + 1) : null;
+
+      request.response.headers.set(HttpHeaders.acceptRangesHeader, 'bytes');
+      request.response.headers.set(HttpHeaders.contentTypeHeader, 'video/mp4');
+
+      if (rangeHeader != null && totalSize > 0) {
+        request.response.statusCode = HttpStatus.partialContent;
+        final endDisplay = actualEnd ?? (totalSize - 1);
+        request.response.headers.set(
+          HttpHeaders.contentRangeHeader,
+          'bytes ' + actualStart.toString() + '-' + endDisplay.toString() + '/' + totalSize.toString(),
+        );
+      } else {
+        request.response.statusCode = HttpStatus.ok;
+      }
+
+      if (contentLength != null && contentLength >= 0) {
+        request.response.contentLength = contentLength;
+      }
+
+      request.response.bufferOutput = false;
+
+      if (method != 'HEAD') {
+        final stream = await megaService.openDecryptedRangeStream(
+          item: item,
+          start: actualStart,
+          end: actualEnd,
+        );
+        await request.response.addStream(stream);
+      }
+
+      await request.response.close();
+    } catch (e) {
+      debugPrint('[LocalStreamProxy] MEGA 스트림 처리 오류: ' + e.toString());
+      try {
+        request.response.statusCode = HttpStatus.internalServerError;
         await request.response.close();
       } catch (_) {}
     }

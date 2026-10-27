@@ -1994,6 +1994,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         icon = Icons.cloud_queue_rounded;
         color = Colors.green;
         break;
+      case CloudType.mega:
+        icon = Icons.lock_outline_rounded;
+        color = Colors.redAccent;
+        break;
     }
     return Icon(icon, size: 13, color: color);
   }
@@ -2037,6 +2041,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
       case CloudType.naver:
         icon = Icons.cloud_queue_rounded;
         color = Colors.green;
+        break;
+      case CloudType.mega:
+        icon = Icons.lock_outline_rounded;
+        color = Colors.redAccent;
         break;
     }
     return Container(
@@ -2090,6 +2098,10 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         icon = Icons.cloud_queue_rounded;
         color = Colors.green;
         break;
+      case CloudType.mega:
+        icon = Icons.lock_outline_rounded;
+        color = Colors.redAccent;
+        break;
     }
 
     return Container(
@@ -2122,6 +2134,8 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         return 'Baidu Netdisk';
       case CloudType.naver:
         return '네이버 MYBOX';
+      case CloudType.mega:
+        return 'MEGA Cloud';
     }
   }
 

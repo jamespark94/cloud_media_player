@@ -10,6 +10,7 @@ enum CloudType {
   terabox,
   baidu,
   naver,
+  mega,
 }
 
 class CloudAccount {

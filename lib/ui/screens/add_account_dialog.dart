@@ -1,3 +1,6 @@
+import '../../services/mega_service.dart';
+import '../../services/mega_api_client.dart';
+import '../../utils/mega_crypto_utils.dart';
 import 'package:url_launcher/url_launcher.dart';
 import '../../services/baidu_service.dart';
 import '../../services/terabox_service.dart';
@@ -49,6 +52,9 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   final TextEditingController _baiduNameController = TextEditingController(text: 'Baidu Netdisk');
   final TextEditingController _naverTokenController = TextEditingController();
   final TextEditingController _naverNameController = TextEditingController(text: '네이버 MYBOX');
+  final TextEditingController _megaNameController = TextEditingController(text: 'MEGA Cloud');
+  final TextEditingController _megaEmailController = TextEditingController();
+  final TextEditingController _megaPasswordController = TextEditingController();
 
 
   // Manual OAuth URL/Code Fallback
@@ -86,6 +92,9 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     _teraBoxNameController.dispose();
     _baiduCookieController.dispose();
     _baiduNameController.dispose();
+    _megaNameController.dispose();
+    _megaEmailController.dispose();
+    _megaPasswordController.dispose();
     _naverTokenController.dispose();
     _naverNameController.dispose();
     _manualUrlController.dispose();
@@ -145,6 +154,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         await _saveBaidu();
       } else if (_selectedType == CloudType.naver) {
         await _saveNaver();
+      } else if (_selectedType == CloudType.mega) {
+        await _saveMega();
       }
       if (mounted) {
         Navigator.pop(context, true);
@@ -479,6 +490,44 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     }
   }
 
+  Future<void> _saveMega() async {
+    final email = _megaEmailController.text.trim();
+    final password = _megaPasswordController.text;
+    if (email.isEmpty || password.isEmpty) {
+      throw Exception('MEGA 이메일과 비밀번호를 모두 입력해주세요.');
+    }
+
+    setState(() {
+      _statusMessage = 'MEGA 계정에 로그인 및 E2EE 키를 유도하고 있습니다...';
+    });
+
+    final accountId = 'mega_${DateTime.now().millisecondsSinceEpoch}';
+    final creds = await MegaAuthManager.loginWithEmailAndPassword(
+      email: email,
+      password: password,
+      accountId: accountId,
+    );
+
+    final newAccount = CloudAccount(
+      id: accountId,
+      name: _megaNameController.text.trim().isNotEmpty
+          ? _megaNameController.text.trim()
+          : 'MEGA Cloud',
+      type: CloudType.mega,
+      email: creds.email,
+      accessToken: creds.sid,
+      refreshToken: MegaCryptoUtils.base64UrlEncode(creds.masterKey),
+    );
+
+    // 연결 및 파일 트리 복호화 검증
+    final service = MegaService(newAccount);
+    await service.listItems();
+
+    if (mounted) {
+      await context.read<AccountManager>().saveAccount(newAccount);
+    }
+  }
+
   Future<void> _saveNaver() async {
     final token = _naverTokenController.text.trim();
     if (token.isEmpty) {
@@ -621,6 +670,14 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         ),
         const SizedBox(height: 8),
         _buildServiceTile(
+          type: CloudType.mega,
+          title: 'MEGA (메가 클라우드)',
+          subtitle: '종단간 암호화(E2EE) 동영상/미디어 스트리밍 연동',
+          icon: Icons.lock_outline_rounded,
+          iconColor: Colors.redAccent,
+        ),
+        const SizedBox(height: 8),
+        _buildServiceTile(
           type: CloudType.naver,
           title: '네이버 MYBOX',
           subtitle: '네이버 MYBOX 개인 액세스 토큰(PAT) 연결',
@@ -732,6 +789,11 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
         title = 'TeraBox 연결';
         icon = Icons.cloud_circle_outlined;
         iconColor = Colors.cyanAccent;
+        break;
+      case CloudType.mega:
+        title = 'MEGA 연결';
+        icon = Icons.lock_outline_rounded;
+        iconColor = Colors.redAccent;
         break;
       case CloudType.naver:
         title = '네이버 MYBOX 연결';
@@ -988,6 +1050,77 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                 label: const Text('계정 확인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
                 style: ElevatedButton.styleFrom(
                   backgroundColor: Colors.cyan.shade700,
+                  foregroundColor: Colors.white,
+                ),
+              ),
+            ),
+          ] else if (type == CloudType.mega) ...[
+            Container(
+              padding: const EdgeInsets.all(12),
+              decoration: BoxDecoration(
+                color: Colors.redAccent.withAlpha(20),
+                borderRadius: BorderRadius.circular(10),
+                border: Border.all(color: Colors.redAccent.withAlpha(70)),
+              ),
+              child: const Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Row(
+                    children: [
+                      Icon(Icons.enhanced_encryption_rounded, size: 18, color: Colors.redAccent),
+                      SizedBox(width: 8),
+                      Text(
+                        'MEGA E2EE 보안 연결 안내',
+                        style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.redAccent),
+                      ),
+                    ],
+                  ),
+                  SizedBox(height: 8),
+                  Text(
+                    'MEGA 계정 이메일과 비밀번호를 입력하면 기기 내에서 마스터 키를 직접 유도하여 종단간 암호화(E2EE) 복호화 파이프라인으로 안전하게 스트리밍합니다.',
+                    style: TextStyle(fontSize: 11, color: Colors.white70, height: 1.45),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(height: 14),
+            TextField(
+              controller: _megaNameController,
+              decoration: const InputDecoration(
+                labelText: '계정 표시 이름',
+                hintText: '예: 내 MEGA 클라우드',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _megaEmailController,
+              keyboardType: TextInputType.emailAddress,
+              decoration: const InputDecoration(
+                labelText: 'MEGA 계정 이메일 *',
+                hintText: 'user@example.com',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 12),
+            TextField(
+              controller: _megaPasswordController,
+              obscureText: true,
+              decoration: const InputDecoration(
+                labelText: '비밀번호 *',
+                border: OutlineInputBorder(),
+              ),
+            ),
+            const SizedBox(height: 16),
+            SizedBox(
+              width: double.infinity,
+              height: 46,
+              child: ElevatedButton.icon(
+                onPressed: _startOAuth,
+                icon: const Icon(Icons.lock_open_rounded),
+                label: const Text('MEGA 연결 및 E2EE 키 확인', style: TextStyle(fontWeight: FontWeight.bold)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.redAccent.shade700,
                   foregroundColor: Colors.white,
                 ),
               ),

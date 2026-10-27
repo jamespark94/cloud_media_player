@@ -55,6 +55,8 @@ dependencies:
   fast_gbk: ^1.0.0
   charset_converter: ^2.5.1
   dio: ^5.11.1
+  flutter_secure_storage: ^11.2.0
+  pointycastle: ^4.0.0
 
 dev_dependencies:
   flutter_test:

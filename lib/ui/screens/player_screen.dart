@@ -397,6 +397,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       final isBaiduOrTeraBox = widget.service.account.type == CloudType.baidu ||
           widget.service.account.type == CloudType.terabox;
       final isNaver = widget.service.account.type == CloudType.naver;
+      final isMega = widget.service.account.type == CloudType.mega;
 
       final rawStreamUrl = await widget.service.getStreamUrlWithQuality(widget.item, defaultQuality);
       final rawHeaders = await widget.service.getStreamHeaders();
@@ -410,10 +411,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       }
 
       // Baidu/TeraBox HLS 및 네이버 MYBOX(단기 유효 서명 토큰/Range 문제 해결)는 LocalStreamProxy 경유
-      final playUrl = ((isBaiduOrTeraBox && isHls) || isNaver)
+      final playUrl = ((isBaiduOrTeraBox && isHls) || isNaver || isMega)
           ? LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: defaultQuality)
           : rawStreamUrl;
-      final headers = ((isBaiduOrTeraBox && isHls) || isNaver) ? <String, String>{} : rawHeaders;
+      final headers = ((isBaiduOrTeraBox && isHls) || isNaver || isMega) ? <String, String>{} : rawHeaders;
 
       debugPrint('[PlayerScreen] 스트림 오픈 시작 (isHls: $isHls, isFallback: $isFallbackToOriginal, quality: ${_currentQuality.label}): $playUrl');
 
@@ -2083,6 +2084,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       final isBaiduOrTeraBox = widget.service.account.type == CloudType.baidu ||
           widget.service.account.type == CloudType.terabox;
       final isNaver = widget.service.account.type == CloudType.naver;
+      final isMega = widget.service.account.type == CloudType.mega;
 
       final rawStreamUrl = await widget.service.getStreamUrlWithQuality(widget.item, targetQuality);
       final rawHeaders = await widget.service.getStreamHeaders();
@@ -2092,10 +2094,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           rawStreamUrl.contains('method=streaming');
       final isFallbackToOriginal = !targetQuality.isOriginal && !isHls;
 
-      final playUrl = ((isBaiduOrTeraBox && isHls) || isNaver)
+      final playUrl = ((isBaiduOrTeraBox && isHls) || isNaver || isMega)
           ? LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: targetQuality)
           : rawStreamUrl;
-      final headers = ((isBaiduOrTeraBox && isHls) || isNaver) ? <String, String>{} : rawHeaders;
+      final headers = ((isBaiduOrTeraBox && isHls) || isNaver || isMega) ? <String, String>{} : rawHeaders;
 
       // 자막 복원 준비
       final activeSub = _player.state.track.subtitle;

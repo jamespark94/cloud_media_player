@@ -1,3 +1,4 @@
+import 'mega_service.dart';
 import 'baidu_service.dart';
 import 'terabox_service.dart';
 import 'package:flutter/foundation.dart';
@@ -118,6 +119,8 @@ class AccountManager extends ChangeNotifier {
         return BaiduService(account, onAccountUpdated: saveAccount);
       case CloudType.naver:
         return NaverBoxService(account, onAccountUpdated: saveAccount);
+      case CloudType.mega:
+        return MegaService(account, onAccountUpdated: saveAccount);
     }
   }
 }
