@@ -473,7 +473,7 @@ class BaiduService extends CloudService {
       final request = http.Request('GET', Uri.parse(directUrl))
         ..followRedirects = false
         ..headers.addAll({
-          'User-Agent': pcsUserAgent,
+          'User-Agent': defaultUserAgent,
           'Cookie': cookieHeader,
           'Referer': 'https://pan.baidu.com/',
         });
@@ -495,6 +495,66 @@ class BaiduService extends CloudService {
     );
 
     return finalStreamUrl;
+  }
+
+  /// 자막 및 파일 다운로드 시 다중 User-Agent 및 엔드포인트 폴백 지원
+  @override
+  Future<Uint8List> downloadBytes(MediaItem item) async {
+    await refreshTokensIfNeeded();
+    final fsId = _extractFsId(item.id);
+    final filePath = _extractPath(item.id);
+
+    // 1. 후보 스트림 URL 목록 수집
+    final candidateUrls = <String>[];
+    try {
+      final streamUrl = await getStreamUrl(item);
+      if (streamUrl.isNotEmpty) candidateUrls.add(streamUrl);
+    } catch (_) {}
+
+    if (filePath.isNotEmpty) {
+      candidateUrls.add(
+        'https://d.pcs.baidu.com/rest/2.0/pcs/file?method=download&app_id=$appId&path=${Uri.encodeComponent(filePath)}',
+      );
+    }
+    if (fsId.isNotEmpty) {
+      candidateUrls.add(
+        'https://pan.baidu.com/api/download?app_id=$appId&web=1&channel=chunlei&clienttype=0&jsToken=${_cachedJsToken ?? ""}&fidlist=[$fsId]',
+      );
+    }
+
+    // 2. 다중 헤더 및 URL 조합으로 다운로드 시도
+    final userAgents = [
+      defaultUserAgent,
+      pcsUserAgent,
+      'netdisk;12.1.2;android;android-android;12;SM-A908N',
+    ];
+
+    for (final url in candidateUrls) {
+      for (final ua in userAgents) {
+        try {
+          final res = await http.get(
+            Uri.parse(url),
+            headers: {
+              'User-Agent': ua,
+              'Cookie': cookieHeader,
+              'Referer': 'https://pan.baidu.com/',
+              'Accept': '*/*',
+            },
+          );
+
+          if (res.statusCode == 200 && res.bodyBytes.isNotEmpty) {
+            final sample = String.fromCharCodes(res.bodyBytes.take(100)).trim().toLowerCase();
+            // HTML 에러 또는 JSON 에러가 아닐 때 성공
+            if (!sample.contains('<!doctype') && !sample.contains('<html') && !(sample.startsWith('{') && sample.contains('errno'))) {
+              debugPrint('[BaiduService] 자막/파일 다운로드 성공: ${item.name} (${res.bodyBytes.length} bytes, UA: $ua)');
+              return res.bodyBytes;
+            }
+          }
+        } catch (_) {}
+      }
+    }
+
+    throw Exception('Baidu 파일 다운로드 실패: 모든 엔드포인트 거부 (403)');
   }
 
   /// /api/streaming API로부터 HLS 스트림 URL 획득 시도

@@ -801,7 +801,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     try {
       debugPrint('[PlayerScreen] 자막 다운로드 요청 시작: ${subItem.name} (id: ${subItem.id})');
       Uint8List bytes;
-      if (widget.service.account.type == CloudType.mega) {
+      if (widget.service.account.type == CloudType.mega || widget.service.account.type == CloudType.baidu) {
         bytes = await widget.service.downloadBytes(subItem);
       } else {
         final url = await widget.service.getStreamUrl(subItem);
@@ -809,9 +809,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         final res = await http.get(Uri.parse(url), headers: headers);
         debugPrint('[PlayerScreen] 자막 응답 상태: ${res.statusCode}, 바이트 크기: ${res.bodyBytes.length}');
         if (res.statusCode != 200 || res.bodyBytes.isEmpty) {
-          return null;
+          // 실패 시 downloadBytes로 2차 시도
+          bytes = await widget.service.downloadBytes(subItem);
+        } else {
+          bytes = res.bodyBytes;
         }
-        bytes = res.bodyBytes;
       }
 
       if (bytes.isNotEmpty) {
