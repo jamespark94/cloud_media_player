@@ -13,10 +13,12 @@ import '../../models/cloud_account.dart';
 import '../../services/account_manager.dart';
 import '../../services/box_service.dart';
 import '../../services/dropbox_service.dart';
+import '../../services/google_auth_manager.dart';
 import '../../services/google_drive_service.dart';
 import '../../services/oauth_helper.dart';
 import '../../services/onedrive_service.dart';
 import '../../utils/battery_utils.dart';
+import '../../widgets/google_login_button.dart';
 
 class AddAccountDialog extends StatefulWidget {
   const AddAccountDialog({super.key});
@@ -25,7 +27,7 @@ class AddAccountDialog extends StatefulWidget {
   State<AddAccountDialog> createState() => _AddAccountDialogState();
 }
 
-class _AddAccountDialogState extends State<AddAccountDialog> {
+class _AddAccountDialogState extends State<AddAccountDialog> with WidgetsBindingObserver {
   // null이면 1단계(서비스 목록 선택), 값이 있으면 2단계(해당 서비스 상세 설정/로그인)
   CloudType? _selectedType;
   bool _isLoading = false;
@@ -63,7 +65,31 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     _checkPowerSaveStatus();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed && _isLoading) {
+      _checkClipboardForAuthCode();
+    }
+  }
+
+  Future<void> _checkClipboardForAuthCode() async {
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      final text = data?.text?.trim();
+      if (text != null && text.isNotEmpty && (text.contains('code=') || text.contains('localhost'))) {
+        _manualUrlController.text = text;
+        final ok = OAuthHelper.submitManualCallback(text);
+        if (ok && mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('클립보드에서 인증 코드를 감지하여 로그인을 완료합니다!')),
+          );
+        }
+      }
+    } catch (_) {}
   }
 
   Future<void> _checkPowerSaveStatus() async {
@@ -81,6 +107,7 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _cancelOAuth();
     _manualRevealTimer?.cancel();
     _clientIdController.dispose();
@@ -116,7 +143,7 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     if (_selectedType == null) return;
 
     _manualRevealTimer?.cancel();
-    _manualRevealTimer = Timer(const Duration(seconds: 10), () {
+    _manualRevealTimer = Timer(const Duration(seconds: 2), () {
       if (mounted && _isLoading && !_showManualInput) {
         setState(() => _showManualInput = true);
       }
@@ -134,10 +161,23 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     setState(() {
       _isLoading = true;
       _errorMessage = null;
-      _statusMessage = '웹 브라우저를 열어 클라우드 로그인을 진행합니다...';
+      _statusMessage = '클라우드 로그인을 진행합니다...';
     });
 
     try {
+      // 안드로이드 기기에서 백그라운드 루프백 서버 동결(FreecessController) 방지를 위해 배터리 예외 확인
+      if (Platform.isAndroid &&
+          (_selectedType == CloudType.googleDrive ||
+              _selectedType == CloudType.oneDrive ||
+              _selectedType == CloudType.box ||
+              _selectedType == CloudType.dropbox)) {
+        final isIgnoring = await BatteryUtils.isIgnoringBatteryOptimizations();
+        if (!isIgnoring) {
+          await BatteryUtils.requestIgnoreBatteryOptimizations();
+          await Future.delayed(const Duration(milliseconds: 500));
+        }
+      }
+
       if (_selectedType == CloudType.googleDrive) {
         await _authenticateGoogle();
       } else if (_selectedType == CloudType.oneDrive) {
@@ -175,9 +215,12 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     final clientId = _clientIdController.text.trim().isNotEmpty
         ? _clientIdController.text.trim()
         : GoogleDriveService.defaultClientId;
+    // 기본 Client Secret은 기본 Client ID와 짝일 때만 사용 (불일치 시 401 invalid_client)
     final clientSecret = _clientSecretController.text.trim().isNotEmpty
         ? _clientSecretController.text.trim()
-        : GoogleDriveService.defaultClientSecret;
+        : (clientId == GoogleDriveService.defaultClientId
+            ? GoogleDriveService.defaultClientSecret
+            : null);
 
     final codeVerifier = OAuthHelper.generateRandomString();
     final codeChallenge = OAuthHelper.generateCodeChallenge(codeVerifier);
@@ -202,7 +245,7 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
     if (code == null) throw Exception('인증 코드가 수신되지 않았거나 취소되었습니다.');
 
     setState(() => _statusMessage = '인증이 확인되었습니다. 토큰 발급 및 계정 등록 중...');
-    await Future.delayed(const Duration(milliseconds: 1200));
+    await Future.delayed(const Duration(milliseconds: 500));
     final tokenData = await OAuthHelper.exchangeGoogleToken(
       code: code,
       redirectUri: params['redirect_uri']!,
@@ -876,21 +919,74 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                 if (_showManualInput) ...[
                   const SizedBox(height: 20),
                   const Divider(),
-                  const SizedBox(height: 8),
-                  const Text(
-                    '자동으로 앱으로 돌아오지 않나요?',
-                    style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13),
+                  const SizedBox(height: 12),
+                  Container(
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.amber.withAlpha(25),
+                      borderRadius: BorderRadius.circular(10),
+                      border: Border.all(color: Colors.amber.withAlpha(80)),
+                    ),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        const Row(
+                          children: [
+                            Icon(Icons.info_outline, color: Colors.amber, size: 18),
+                            SizedBox(width: 8),
+                            Expanded(
+                              child: Text(
+                                '브라우저에서 자동 복귀가 안 되나요?',
+                                style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13, color: Colors.amber),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 6),
+                        const Text(
+                          '구글 인증은 이미 통과된 상태입니다!\n브라우저 상단 주소창(URL)을 길게 눌러 [전체 복사]한 후, 아래 버튼을 누르시면 즉시 연결됩니다.',
+                          style: TextStyle(fontSize: 12, color: Colors.white70, height: 1.4),
+                        ),
+                        const SizedBox(height: 12),
+                        SizedBox(
+                          width: double.infinity,
+                          child: ElevatedButton.icon(
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.amber.shade700,
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 12),
+                            ),
+                            icon: const Icon(Icons.content_paste, size: 18),
+                            label: const Text('📋 클립보드 주소 붙여넣고 즉시 등록', style: TextStyle(fontWeight: FontWeight.bold)),
+                            onPressed: () async {
+                              final data = await Clipboard.getData(Clipboard.kTextPlain);
+                              final text = data?.text?.trim();
+                              if (text != null && text.isNotEmpty) {
+                                _manualUrlController.text = text;
+                                final ok = OAuthHelper.submitManualCallback(text);
+                                if (!ok && mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('클립보드에서 유효한 인증 코드를 찾을 수 없습니다. 주소 전체를 다시 복사해주세요.')),
+                                  );
+                                }
+                              } else {
+                                if (mounted) {
+                                  ScaffoldMessenger.of(context).showSnackBar(
+                                    const SnackBar(content: Text('클립보드가 비어있습니다. 브라우저 주소창을 복사해주세요.')),
+                                  );
+                                }
+                              }
+                            },
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
-                  const SizedBox(height: 4),
-                  const Text(
-                    '브라우저 주소창의 전체 URL 또는 code= 값을 아래에 붙여넣으세요:',
-                    style: TextStyle(color: Colors.grey, fontSize: 12),
-                  ),
-                  const SizedBox(height: 10),
+                  const SizedBox(height: 12),
                   TextField(
                     controller: _manualUrlController,
                     decoration: const InputDecoration(
-                      hintText: 'http://localhost:53682/?code=...',
+                      hintText: 'http://localhost:8999/callback?code=...',
                       border: OutlineInputBorder(),
                       isDense: true,
                     ),
@@ -901,7 +997,7 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
                       final input = _manualUrlController.text.trim();
                       if (input.isNotEmpty) {
                         final ok = OAuthHelper.submitManualCallback(input);
-                        if (!ok) {
+                        if (!ok && mounted) {
                           ScaffoldMessenger.of(context).showSnackBar(
                             const SnackBar(content: Text('유효한 인증 코드를 찾을 수 없습니다.')),
                           );
@@ -1461,15 +1557,58 @@ class _AddAccountDialogState extends State<AddAccountDialog> {
             ],
 
             const SizedBox(height: 16),
-            SizedBox(
-              width: double.infinity,
-              height: 46,
-              child: ElevatedButton.icon(
-                onPressed: _startOAuth,
-                icon: const Icon(Icons.open_in_browser),
-                label: const Text('브라우저 열어 로그인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
+            if (type == CloudType.googleDrive && (Platform.isAndroid || Platform.isIOS)) ...[
+              SizedBox(
+                width: double.infinity,
+                child: GoogleLoginButton(
+                  label: 'Google 계정으로 원터치 연결',
+                  onSuccess: (googleAccount) async {
+                    final navigator = Navigator.of(context);
+                    final accountMgr = context.read<AccountManager>();
+                    final token = await GoogleAuthManager().getAccessToken() ?? '';
+                    final account = CloudAccount(
+                      id: 'gdrive_${googleAccount.id}',
+                      name: 'Google Drive (${googleAccount.displayName ?? googleAccount.email})',
+                      type: CloudType.googleDrive,
+                      email: googleAccount.email,
+                      accessToken: token,
+                      refreshToken: 'google_sign_in',
+                      tokenExpiry: DateTime.now().add(const Duration(minutes: 55)),
+                    );
+                    await accountMgr.saveAccount(account);
+                    if (mounted) {
+                      navigator.pop(true);
+                    }
+                  },
+                  onError: (err) {
+                    final errStr = err.toString();
+                    if (errStr.contains('10') || errStr.contains('sign_in_failed') || errStr.contains('DEVELOPER_ERROR')) {
+                      _startOAuth();
+                    }
+                  },
+                ),
               ),
-            ),
+              const SizedBox(height: 10),
+              SizedBox(
+                width: double.infinity,
+                height: 44,
+                child: OutlinedButton.icon(
+                  onPressed: _startOAuth,
+                  icon: const Icon(Icons.open_in_browser, size: 18),
+                  label: const Text('인앱 브라우저로 로그인 및 연결'),
+                ),
+              ),
+            ] else ...[
+              SizedBox(
+                width: double.infinity,
+                height: 46,
+                child: ElevatedButton.icon(
+                  onPressed: _startOAuth,
+                  icon: const Icon(Icons.open_in_browser),
+                  label: const Text('브라우저 열어 로그인 및 연결', style: TextStyle(fontWeight: FontWeight.bold)),
+                ),
+              ),
+            ],
           ],
         ],
       ],

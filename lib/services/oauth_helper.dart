@@ -27,23 +27,41 @@ class OAuthHelper {
     if (trimmed.isEmpty) return false;
 
     String? code;
+
+    // 1. URL 형태인 경우 queryParameters에서 code 추출 (http:// 스킴 보정)
     try {
-      final uri = Uri.tryParse(trimmed);
+      var parseTarget = trimmed;
+      if (!parseTarget.startsWith('http://') && !parseTarget.startsWith('https://')) {
+        parseTarget = 'http://$parseTarget';
+      }
+      final uri = Uri.tryParse(parseTarget);
       if (uri != null && uri.queryParameters.containsKey('code')) {
         code = uri.queryParameters['code'];
       }
     } catch (_) {}
 
+    // 2. 정규식으로 code= 파라미터 추출 (& 및 # 이전까지 추출)
     if (code == null && trimmed.contains('code=')) {
-      final match = RegExp(r'[?&]code=([^&]+)').firstMatch(trimmed);
+      final match = RegExp(r'[?&]code=([^&#\s]+)').firstMatch(trimmed);
       if (match != null) {
         code = Uri.decodeComponent(match.group(1)!);
       }
     }
 
-    code ??= trimmed;
+    // 3. 만약 URL이 아니고 직접 코드만 입력한 경우 (예: 4/0A... 또는 공백 없는 영숫자/특수문자 코드)
+    if (code == null) {
+      if (trimmed.startsWith('4/') ||
+          (!trimmed.startsWith('http://') &&
+              !trimmed.startsWith('https://') &&
+              !trimmed.contains('/'))) {
+        code = trimmed;
+      }
+    }
 
-    if (code.isNotEmpty && _activeAuthCompleter != null && !_activeAuthCompleter!.isCompleted) {
+    if (code != null &&
+        code.isNotEmpty &&
+        _activeAuthCompleter != null &&
+        !_activeAuthCompleter!.isCompleted) {
       _activeAuthCompleter!.complete(code);
       return true;
     }
@@ -70,18 +88,22 @@ class OAuthHelper {
     HttpServer? serverIpv6;
 
     try {
-      serverIpv4 = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+      serverIpv4 = await HttpServer.bind(InternetAddress.loopbackIPv4, port, shared: true);
     } catch (_) {
       try {
-        serverIpv4 = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
-      } catch (e) {
-        throw Exception('로컬 루프백 서버 바인드 실패: $e');
+        serverIpv4 = await HttpServer.bind(InternetAddress.anyIPv4, port, shared: true);
+      } catch (_) {
+        try {
+          serverIpv4 = await HttpServer.bind(InternetAddress.loopbackIPv4, 0, shared: true);
+        } catch (e) {
+          throw Exception('로컬 루프백 서버 바인드 실패: $e');
+        }
       }
     }
 
     final actualPort = serverIpv4.port;
     try {
-      serverIpv6 = await HttpServer.bind(InternetAddress.loopbackIPv6, actualPort);
+      serverIpv6 = await HttpServer.bind(InternetAddress.loopbackIPv6, actualPort, shared: true);
     } catch (_) {
       // IPv6 지원이 비활성화된 환경에서는 IPv4로만 진행
     }
@@ -134,9 +156,9 @@ class OAuthHelper {
                 </head>
                 <body style="font-family:sans-serif;text-align:center;padding:50px 20px;background:#121212;color:#ffffff;">
                   <h2 style="color:#4CAF50;">✓ 인증이 성공적으로 완료되었습니다!</h2>
-                  <p>이 창을 닫고 클라우드 미디어 플레이어 앱으로 돌아가세요.</p>
+                  <p>이 창을 닫고 앱으로 돌아가세요.</p>
                   <script>
-                    window.setTimeout(function(){ window.close(); }, 1500);
+                    window.setTimeout(function(){ window.close(); }, 1000);
                   </script>
                 </body>
               </html>
@@ -186,11 +208,11 @@ class OAuthHelper {
     serverIpv4.listen(handleRequest);
     serverIpv6?.listen(handleRequest);
 
-    // 기본 웹 브라우저 / 커스텀 탭에서 인증 URL 실행
+    // 모바일(Android/iOS)에서는 Chrome Custom Tabs(inAppBrowserView)를 최우선 사용하여
+    // 앱과 동일한 태스크 스택을 유지함으로써 삼성 One UI FreecessController가
+    // 백그라운드 루프백 서버 소켓을 동결(TimeoutException 유발)하는 현상을 방지합니다.
     bool launched = false;
     try {
-      // 모바일(Android/iOS)에서는 inAppBrowserView(Chrome Custom Tabs)를 우선 사용하여
-      // 삼성 One UI 프로세스 동결(Freezer)을 방지하고 자동 복귀를 지원합니다.
       if (Platform.isAndroid || Platform.isIOS) {
         try {
           launched = await launchUrl(uri, mode: LaunchMode.inAppBrowserView);
@@ -248,9 +270,15 @@ class OAuthHelper {
     dynamic lastError;
     for (int attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        final res = await http.post(uri, headers: headers, body: body);
+        final res = await http
+            .post(uri, headers: headers, body: body)
+            .timeout(const Duration(seconds: 20));
         return res;
       } on SocketException catch (e) {
+        lastError = e;
+        if (attempt == maxAttempts) rethrow;
+        await Future.delayed(Duration(milliseconds: 1000 + (500 * attempt)));
+      } on TimeoutException catch (e) {
         lastError = e;
         if (attempt == maxAttempts) rethrow;
         await Future.delayed(Duration(milliseconds: 1000 + (500 * attempt)));

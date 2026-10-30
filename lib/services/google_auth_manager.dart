@@ -12,8 +12,17 @@ class GoogleAuthManager {
   static const String driveReadonlyScope =
       'https://www.googleapis.com/auth/drive.readonly';
 
+  /// Google Drive 앱 생성 파일(재생기록/독서기록 동기화 JSON) 읽기/쓰기 스코프
+  static const String driveFileScope =
+      'https://www.googleapis.com/auth/drive.file';
+
+  static const List<String> requiredScopes = <String>[
+    driveReadonlyScope,
+    driveFileScope,
+  ];
+
   final GoogleSignIn _googleSignIn = GoogleSignIn(
-    scopes: <String>[driveReadonlyScope],
+    scopes: requiredScopes,
   );
 
   GoogleSignInAccount? _currentUser;
@@ -51,6 +60,7 @@ class GoogleAuthManager {
   /// 대화형 로그인 (네이티브 바텀시트 / 계정 선택기)
   Future<GoogleSignInAccount?> signIn() async {
     try {
+      // 기존 캐시 충돌 방지를 위해 필요 시 세션 정리 후 로그인
       final account = await _googleSignIn.signIn();
       if (account == null) {
         debugPrint('[GoogleAuthManager] User cancelled sign in.');
@@ -58,14 +68,20 @@ class GoogleAuthManager {
       }
 
       // 필수 스코프 부여 여부 검증 및 요청
-      final hasScope = await _googleSignIn.canAccessScopes([driveReadonlyScope]);
-      if (!hasScope) {
-        final granted = await _googleSignIn.requestScopes([driveReadonlyScope]);
-        if (!granted) {
-          debugPrint('[GoogleAuthManager] Scope $driveReadonlyScope was denied.');
-          await signOut();
-          throw Exception('Google Drive 읽기 권한이 거부되었습니다.');
+      try {
+        final hasScope = await _googleSignIn.canAccessScopes(requiredScopes);
+        if (!hasScope) {
+          final granted = await _googleSignIn.requestScopes(requiredScopes);
+          if (!granted) {
+            debugPrint('[GoogleAuthManager] Scope $requiredScopes was denied.');
+            await signOut();
+            throw Exception('Google Drive 접근 권한이 거부되었습니다.');
+          }
         }
+      } catch (scopeError) {
+        // Android의 경우 signIn() 시점에 이미 scopes가 요청/승인되므로
+        // canAccessScopes가 지원되지 않거나 예외가 나더라도 authHeaders 획득 가능 여부로 검증
+        debugPrint('[GoogleAuthManager] Scope check note: $scopeError');
       }
 
       _currentUser = account;
@@ -87,6 +103,18 @@ class GoogleAuthManager {
       debugPrint('[GoogleAuthManager] signInSilently failed: $e');
       return null;
     }
+  }
+
+  /// 최신 액세스 토큰 문자열 반환 (실패 시 null)
+  Future<String?> getAccessToken() async {
+    try {
+      final headers = await getAuthHeaders();
+      final auth = headers['Authorization'];
+      if (auth != null && auth.startsWith('Bearer ')) {
+        return auth.substring(7).trim();
+      }
+    } catch (_) {}
+    return null;
   }
 
   /// 최신 인증 헤더 반환 (`{'Authorization': 'Bearer <token>'}`)

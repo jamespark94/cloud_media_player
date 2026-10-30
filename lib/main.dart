@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
@@ -5,6 +6,7 @@ import 'package:provider/provider.dart';
 import 'package:window_manager/window_manager.dart';
 import 'services/account_manager.dart';
 import 'services/folder_shortcut_manager.dart';
+import 'services/google_auth_manager.dart';
 import 'services/local_stream_proxy.dart';
 import 'services/playback_history_service.dart';
 import 'ui/screens/home_screen.dart';
@@ -23,7 +25,10 @@ void main() async {
   // 2. 플랫폼 환경(에뮬레이터 여부 등) 감지 초기화
   await PlatformUtils.initialize();
 
-  // 3. 대용량 동영상 구간 탐색(Seek) 및 토큰 중계 로컬 스트림 프록시 기동
+  // 3. Google Sign-In 이전 로그인 세션 비차단 무음 복구
+  unawaited(GoogleAuthManager().initialize());
+
+  // 4. 대용량 동영상 구간 탐색(Seek) 및 토큰 중계 로컬 스트림 프록시 기동
   await LocalStreamProxy.instance.start();
 
   runApp(

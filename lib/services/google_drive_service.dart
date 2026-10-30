@@ -3,6 +3,7 @@ import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/media_item.dart';
 import 'cloud_service_interface.dart';
+import 'google_auth_manager.dart';
 import 'oauth_helper.dart';
 
 class GoogleDriveService extends CloudService {
@@ -20,62 +21,121 @@ class GoogleDriveService extends CloudService {
 
   String? get activeClientSecret => account.customClientSecret?.isNotEmpty == true
       ? account.customClientSecret!
-      : defaultClientSecret;
+      : (activeClientId == defaultClientId ? defaultClientSecret : null);
 
+  /// 네이티브 GoogleSignIn 또는 OAuth Refresh Token을 통해 토큰을 최신 상태로 유지
   @override
   Future<bool> refreshTokensIfNeeded() async {
-    if (!account.isTokenExpired) return true;
-    if (account.refreshToken == null || account.refreshToken!.isEmpty) return false;
-
-    try {
-      final body = {
-        'client_id': activeClientId,
-        'refresh_token': account.refreshToken!,
-        'grant_type': 'refresh_token',
-      };
-      if (activeClientSecret?.isNotEmpty == true) {
-        body['client_secret'] = activeClientSecret!;
-      }
-
-      final res = await OAuthHelper.postWithRetry(
-        Uri.parse(tokenEndpoint),
-        headers: {'Content-Type': 'application/x-www-form-urlencoded'},
-        body: body,
-      );
-
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        account.accessToken = data['access_token'];
-        if (data['refresh_token'] != null && (data['refresh_token'] as String).isNotEmpty) {
-          account.refreshToken = data['refresh_token'];
+    // 1. 네이티브 GoogleSignIn 세션이 활성화되어 있거나 복구 가능한 경우 우선 사용
+    if (account.refreshToken == null || account.refreshToken!.isEmpty || account.refreshToken == 'google_sign_in') {
+      try {
+        final token = await GoogleAuthManager().getAccessToken();
+        if (token != null && token.isNotEmpty) {
+          account.accessToken = token;
+          account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
+          await onAccountUpdated?.call(account);
+          return true;
         }
-        final expiresIn = data['expires_in'] as int? ?? 3600;
-        account.tokenExpiry = DateTime.now().add(Duration(seconds: expiresIn));
+      } catch (e) {
+        debugPrint('[GoogleDriveService] GoogleAuthManager token check: $e');
+      }
+    }
+
+    if (!account.isTokenExpired && account.accessToken.isNotEmpty) return true;
+
+    // 2. OAuth Refresh Token이 있는 경우 (루프백/웹뷰 인증 방식)
+    if (account.refreshToken != null &&
+        account.refreshToken!.isNotEmpty &&
+        account.refreshToken != 'google_sign_in') {
+      try {
+        final body = {
+          'client_id': activeClientId,
+          'refresh_token': account.refreshToken!,
+          'grant_type': 'refresh_token',
+        };
+        if (activeClientSecret?.isNotEmpty == true) {
+          body['client_secret'] = activeClientSecret!;
+        }
+
+        final res = await OAuthHelper.postWithRetry(
+          Uri.parse(tokenEndpoint),
+          headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+          body: body,
+        );
+
+        if (res.statusCode == 200) {
+          final data = jsonDecode(res.body);
+          account.accessToken = data['access_token'];
+          if (data['refresh_token'] != null && (data['refresh_token'] as String).isNotEmpty) {
+            account.refreshToken = data['refresh_token'];
+          }
+          final expiresIn = data['expires_in'] as int? ?? 3600;
+          account.tokenExpiry = DateTime.now().add(Duration(seconds: expiresIn));
+          await onAccountUpdated?.call(account);
+          return true;
+        }
+      } catch (_) {}
+    }
+
+    // 3. 마지막 폴백으로 네이티브 GoogleSignIn 강제 갱신 시도
+    try {
+      final headers = await GoogleAuthManager().refreshAuthHeaders();
+      final auth = headers['Authorization'];
+      if (auth != null && auth.startsWith('Bearer ')) {
+        account.accessToken = auth.substring(7).trim();
+        account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
         await onAccountUpdated?.call(account);
         return true;
       }
     } catch (_) {}
-    return false;
+
+    return account.accessToken.isNotEmpty;
+  }
+
+  /// 401 발생 시 네이티브 캐시 파기 또는 OAuth 토큰 강제 재발급
+  Future<bool> _forceRefreshOn401() async {
+    account.tokenExpiry = DateTime.now().subtract(const Duration(minutes: 5));
+    if (account.refreshToken == null || account.refreshToken!.isEmpty || account.refreshToken == 'google_sign_in') {
+      try {
+        final headers = await GoogleAuthManager().refreshAuthHeaders();
+        final auth = headers['Authorization'];
+        if (auth != null && auth.startsWith('Bearer ')) {
+          account.accessToken = auth.substring(7).trim();
+          account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
+          await onAccountUpdated?.call(account);
+          return true;
+        }
+      } catch (_) {}
+    }
+    return await refreshTokensIfNeeded();
   }
 
   @override
   Future<List<MediaItem>> listItems({String? folderId}) async {
     await refreshTokensIfNeeded();
-    final parent = folderId ?? 'root';
+    final parent = (folderId == null || folderId.isEmpty) ? 'root' : folderId;
     final query = Uri.encodeComponent("'$parent' in parents and trashed = false");
     final url =
-        'https://www.googleapis.com/drive/v3/files?q=$query&fields=files(id,name,mimeType,size,thumbnailLink,modifiedTime,videoMediaMetadata)&orderBy=folder,name';
+        'https://www.googleapis.com/drive/v3/files?q=$query&fields=files(id,name,mimeType,size,thumbnailLink,modifiedTime,videoMediaMetadata)&orderBy=folder,name&pageSize=1000';
 
-    final res = await http.get(
+    var res = await http.get(
       Uri.parse(url),
       headers: await getStreamHeaders(),
     );
+
+    if (res.statusCode == 401) {
+      await _forceRefreshOn401();
+      res = await http.get(
+        Uri.parse(url),
+        headers: await getStreamHeaders(),
+      );
+    }
 
     if (res.statusCode != 200) {
       throw Exception('구글 드라이브 파일 목록 조회 실패 (${res.statusCode}): ${res.body}');
     }
 
-    final data = jsonDecode(res.body);
+    final data = jsonDecode(utf8.decode(res.bodyBytes));
     final files = (data['files'] as List<dynamic>? ?? []);
 
     return files.map((f) {
@@ -117,6 +177,9 @@ class GoogleDriveService extends CloudService {
 
   @override
   Future<Map<String, String>> getStreamHeaders() async {
+    if (account.isTokenExpired || account.accessToken.isEmpty) {
+      await refreshTokensIfNeeded();
+    }
     return {
       'Authorization': 'Bearer ${account.accessToken}',
     };
@@ -127,7 +190,11 @@ class GoogleDriveService extends CloudService {
     try {
       await refreshTokensIfNeeded();
       final url = 'https://www.googleapis.com/drive/v3/files/${item.id}?fields=thumbnailLink';
-      final res = await http.get(Uri.parse(url), headers: await getStreamHeaders());
+      var res = await http.get(Uri.parse(url), headers: await getStreamHeaders());
+      if (res.statusCode == 401) {
+        await _forceRefreshOn401();
+        res = await http.get(Uri.parse(url), headers: await getStreamHeaders());
+      }
       if (res.statusCode == 200) {
         final data = jsonDecode(res.body);
         final link = data['thumbnailLink'] as String?;
