@@ -346,6 +346,16 @@ class BaiduService extends CloudService {
   @override
   VideoQuality getDefaultPlaybackQuality() => VideoQuality.q360p;
 
+  /// 다른 화질 스트림 URL을 백그라운드에서 사전 조회/캐싱합니다.
+  @override
+  Future<void> prefetchQualities(MediaItem item, List<VideoQuality> qualities) async {
+    for (final q in qualities) {
+      try {
+        await _resolveStreamUrl(item, q);
+      } catch (_) {}
+    }
+  }
+
   /// 특정 화질 HLS 또는 원본 스트리밍 URL 반환
   @override
   Future<String> getStreamUrlWithQuality(MediaItem item, VideoQuality quality) async {

@@ -19,23 +19,56 @@ class CustomSubtitleView extends StatefulWidget {
 class _CustomSubtitleViewState extends State<CustomSubtitleView> {
   List<String> _subtitle = [];
   StreamSubscription<List<String>>? _subscription;
+  Timer? _bridgeClearTimer;
 
   @override
   void initState() {
     super.initState();
-    _subtitle = widget.player.state.subtitle;
-    _subscription = widget.player.stream.subtitle.listen((value) {
+    _subscribeToPlayer(widget.player);
+    SubtitleSettingsService.instance.init();
+  }
+
+  @override
+  void didUpdateWidget(covariant CustomSubtitleView oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.player != widget.player) {
+      _subscription?.cancel();
+      // 이전 플레이어에 자막이 떠 있던 상태에서 새 플레이어로 전환될 때
+      // 새 플레이어가 첫 자막을 읽어오기 전까지 직전 자막을 1.5초간 브릿지 유지하여 깜빡임 방지
+      final oldSubs = _subtitle;
+      _subscribeToPlayer(widget.player);
+      if (_subtitle.isEmpty && oldSubs.isNotEmpty) {
+        _subtitle = oldSubs;
+        _bridgeClearTimer?.cancel();
+        _bridgeClearTimer = Timer(const Duration(milliseconds: 1500), () {
+          if (mounted && widget.player.state.subtitle.isEmpty) {
+            setState(() {
+              _subtitle = [];
+            });
+          }
+        });
+      }
+    }
+  }
+
+  void _subscribeToPlayer(Player player) {
+    final cur = player.state.subtitle;
+    if (cur.isNotEmpty) {
+      _subtitle = cur;
+    }
+    _subscription = player.stream.subtitle.listen((value) {
+      _bridgeClearTimer?.cancel();
       if (mounted) {
         setState(() {
           _subtitle = value;
         });
       }
     });
-    SubtitleSettingsService.instance.init();
   }
 
   @override
   void dispose() {
+    _bridgeClearTimer?.cancel();
     _subscription?.cancel();
     super.dispose();
   }

@@ -27,6 +27,9 @@ abstract class CloudService {
   /// 기본 재생 시작 권장 화질을 반환합니다.
   VideoQuality getDefaultPlaybackQuality() => VideoQuality.original;
 
+  /// 다른 화질 스트림 URL을 백그라운드에서 사전 조회/캐싱합니다.
+  Future<void> prefetchQualities(MediaItem item, List<VideoQuality> qualities) async {}
+
   /// 스트리밍/다운로드 요청 시 필요한 인증 헤더 (예: Authorization Bearer)
   Future<Map<String, String>> getStreamHeaders();
 

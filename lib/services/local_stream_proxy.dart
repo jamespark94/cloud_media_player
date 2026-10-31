@@ -44,6 +44,19 @@ class LocalStreamProxy {
     return 'http://127.0.0.1:${_server!.port}/stream?session=$sessionId';
   }
 
+  /// 프록시 세션을 안전하게 정리합니다.
+  void unregisterStream(String? streamUrl) {
+    if (streamUrl == null || !streamUrl.contains('session=')) return;
+    try {
+      final uri = Uri.parse(streamUrl);
+      final sessionId = uri.queryParameters['session'];
+      if (sessionId != null) {
+        _sessions.remove(sessionId);
+        debugPrint('[LocalStreamProxy] 스트림 세션 등록 해제: $sessionId');
+      }
+    } catch (_) {}
+  }
+
   void _handleRequest(HttpRequest request) async {
     // 1. 하위 M3U8 또는 세그먼트(.ts) 프록시 요청 처리
     if (request.uri.path == '/hls_segment') {
