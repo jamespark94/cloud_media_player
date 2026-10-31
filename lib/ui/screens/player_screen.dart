@@ -103,6 +103,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   String? _currentSubtitleId;
   String? _currentSubtitleName;
   String? _currentSubtitleLanguage;
+  File? _activeExternalSubtitleFile;
   bool _isApplyingSubtitle = false;
   Duration? _pendingSeekAfterSubtitle;
   SubtitleTrack? _pendingInitialSubtitleTrack;
@@ -441,6 +442,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
       // 5. 다운로드 완료된 외부 자막이 있으면 즉시 연결 및 미디어 트랙 완료 시 보장 등록
       if (initialSubtitleFile != null && initialSubtitleFile.existsSync()) {
+        _activeExternalSubtitleFile = initialSubtitleFile;
         final subTrack = SubtitleTrack.uri(
           initialSubtitleFile.path,
           title: initialSubtitleName,
@@ -886,6 +888,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       if (type == 'local' && id != null) {
         final localFile = File(id);
         if (localFile.existsSync()) {
+          _activeExternalSubtitleFile = localFile;
           await _player.setSubtitleTrack(
             SubtitleTrack.uri(localFile.path, title: name ?? 'local', language: language ?? 'ko'),
           );
@@ -894,6 +897,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         final subItem = MediaItem(id: id, name: name ?? 'subtitle', isFolder: false);
         final cached = await _downloadAndNormalizeSubtitle(subItem);
         if (cached != null && cached.existsSync() && cached.lengthSync() > 0) {
+          _activeExternalSubtitleFile = cached;
           final subTrack = SubtitleTrack.uri(cached.path, title: name, language: language ?? 'ko');
           debugPrint('[PlayerScreen] 자막 트랙 설정 완료: ${cached.path}');
           await _player.setSubtitleTrack(subTrack);
@@ -902,7 +906,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           debugPrint('[PlayerScreen] 자막 다운로드/캐시 파일이 비어있거나 생성 실패');
         }
       } else if (type == 'track' && id != null) {
+        _activeExternalSubtitleFile = null;
         _restoreTrackSubtitle(_player.state.tracks.subtitle);
+      } else if (type == 'none') {
+        _activeExternalSubtitleFile = null;
       }
 
       if (mounted && name != null) {
@@ -1006,6 +1013,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       }
 
       if (selectedSub != null && localSubFile != null && mounted) {
+        _activeExternalSubtitleFile = localSubFile;
         await _player.setSubtitleTrack(
           SubtitleTrack.uri(localSubFile.path, title: selectedSub.name, language: 'ko'),
         );
@@ -1054,6 +1062,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     if (_currentSubtitleType == 'local' && _currentSubtitleId != null) {
       final localFile = File(_currentSubtitleId!);
       if (localFile.existsSync()) {
+        _activeExternalSubtitleFile = localFile;
         await _player.setSubtitleTrack(
           SubtitleTrack.uri(localFile.path, title: _currentSubtitleName ?? 'local', language: _currentSubtitleLanguage ?? 'ko'),
         );
@@ -1106,6 +1115,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         final downloadedFile = await _downloadAndNormalizeSubtitle(subItem);
         if (downloadedFile != null && downloadedFile.existsSync() && downloadedFile.lengthSync() > 0) {
           if (!mounted) return;
+          _activeExternalSubtitleFile = downloadedFile;
           await _player.setSubtitleTrack(
             SubtitleTrack.uri(downloadedFile.path, title: subItem.name, language: lang ?? 'ko'),
           );
@@ -2108,8 +2118,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           : rawStreamUrl;
       final headers = ((isBaiduOrTeraBox && isHls) || isNaver || isMega) ? <String, String>{} : rawHeaders;
 
-      // 자막 복원 준비
+      // 자막 복원 준비: 외부 파일 자막과 내장 트랙 정보 모두 보존
       final activeSub = _player.state.track.subtitle;
+      final externalSubFile = _activeExternalSubtitleFile;
+      final savedSubName = _currentSubtitleName;
+      final savedSubLang = _currentSubtitleLanguage;
+      final savedSubType = _currentSubtitleType;
 
       await _player.open(
         Media(
@@ -2142,11 +2156,45 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         );
       }
 
-      // 자막 트랙 재적용
-      if (activeSub.id != 'no') {
-        try {
-          await _player.setSubtitleTrack(activeSub);
-        } catch (_) {}
+      // 자막 트랙 재적용 (외부 자막 파일 우선 복원, 그 외 내장 트랙 복원)
+      if (savedSubType != 'none') {
+        if (externalSubFile != null && externalSubFile.existsSync()) {
+          final subTrack = SubtitleTrack.uri(
+            externalSubFile.path,
+            title: savedSubName,
+            language: savedSubLang ?? 'ko',
+          );
+          _pendingInitialSubtitleTrack = subTrack;
+          // 비동기 복원 보장
+          () async {
+            try {
+              await _player.stream.duration
+                  .firstWhere((d) => d > Duration.zero)
+                  .timeout(const Duration(seconds: 15), onTimeout: () => Duration.zero);
+            } catch (_) {}
+            if (!mounted) return;
+            if (_currentSubtitleType == 'none') return;
+            try {
+              await _player.setSubtitleTrack(subTrack);
+              _hasAutoSelectedSubtitle = true;
+            } catch (e) {
+              debugPrint('[PlayerScreen] 화질 전환 후 자막 트랙 재적용 오류: $e');
+            }
+          }();
+        } else if (activeSub.id != 'no') {
+          () async {
+            try {
+              await _player.stream.duration
+                  .firstWhere((d) => d > Duration.zero)
+                  .timeout(const Duration(seconds: 15), onTimeout: () => Duration.zero);
+            } catch (_) {}
+            if (!mounted) return;
+            if (_currentSubtitleType == 'none') return;
+            try {
+              await _player.setSubtitleTrack(activeSub);
+            } catch (_) {}
+          }();
+        }
       }
 
       if (mounted) {
@@ -2182,72 +2230,88 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _startHideTimer();
     showModalBottomSheet(
       context: context,
+      isScrollControlled: true,
       backgroundColor: const Color(0xFF1E1E1E),
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
       ),
       builder: (ctx) {
+        final screenHeight = MediaQuery.of(ctx).size.height;
         return SafeArea(
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Padding(
-                padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
-                child: Row(
-                  children: [
-                    const Icon(Icons.hd_outlined, color: Colors.blueAccent),
-                    const SizedBox(width: 10),
-                    const Text(
-                      '해상도(화질) 선택',
-                      style: TextStyle(
-                        color: Colors.white,
-                        fontSize: 18,
-                        fontWeight: FontWeight.bold,
+          child: ConstrainedBox(
+            constraints: BoxConstraints(
+              maxHeight: screenHeight * 0.85,
+            ),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Padding(
+                  padding: const EdgeInsets.fromLTRB(20, 16, 20, 12),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.hd_outlined, color: Colors.blueAccent),
+                      const SizedBox(width: 10),
+                      const Text(
+                        '해상도(화질) 선택',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 18,
+                          fontWeight: FontWeight.bold,
+                        ),
                       ),
-                    ),
-                    const Spacer(),
-                    IconButton(
-                      icon: const Icon(Icons.close, color: Colors.white70),
-                      onPressed: () => Navigator.pop(ctx),
-                    ),
-                  ],
+                      const Spacer(),
+                      IconButton(
+                        icon: const Icon(Icons.close, color: Colors.white70),
+                        onPressed: () => Navigator.pop(ctx),
+                      ),
+                    ],
+                  ),
                 ),
-              ),
-              const Divider(color: Colors.white12, height: 1),
-              ..._availableQualities.map((quality) {
-                final isSelected = quality == _currentQuality;
-                return ListTile(
-                  leading: Icon(
-                    isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
-                    color: isSelected ? Colors.blueAccent : Colors.white38,
-                  ),
-                  title: Text(
-                    quality.label,
-                    style: TextStyle(
-                      color: isSelected ? Colors.blueAccent : Colors.white,
-                      fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                const Divider(color: Colors.white12, height: 1),
+                Flexible(
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        ..._availableQualities.map((quality) {
+                          final isSelected = quality == _currentQuality;
+                          return ListTile(
+                            leading: Icon(
+                              isSelected ? Icons.radio_button_checked : Icons.radio_button_off,
+                              color: isSelected ? Colors.blueAccent : Colors.white38,
+                            ),
+                            title: Text(
+                              quality.label,
+                              style: TextStyle(
+                                color: isSelected ? Colors.blueAccent : Colors.white,
+                                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                              ),
+                            ),
+                            subtitle: quality.isOriginal
+                                ? const Text(
+                                    '무료 계정 속도 제한으로 버퍼링이 발생할 수 있습니다.',
+                                    style: TextStyle(color: Colors.white38, fontSize: 11),
+                                  )
+                                : (quality == VideoQuality.q360p
+                                    ? const Text(
+                                        '저속 회선/무료 계정에 최적화된 빠른 시작 모드',
+                                        style: TextStyle(color: Colors.white38, fontSize: 11),
+                                      )
+                                    : null),
+                            onTap: () {
+                              Navigator.pop(ctx);
+                              _switchQuality(quality);
+                            },
+                          );
+                        }),
+                        const SizedBox(height: 12),
+                      ],
                     ),
                   ),
-                  subtitle: quality.isOriginal
-                      ? const Text(
-                          '무료 계정 속도 제한으로 버퍼링이 발생할 수 있습니다.',
-                          style: TextStyle(color: Colors.white38, fontSize: 11),
-                        )
-                      : (quality == VideoQuality.q360p
-                          ? const Text(
-                              '저속 회선/무료 계정에 최적화된 빠른 시작 모드',
-                              style: TextStyle(color: Colors.white38, fontSize: 11),
-                            )
-                          : null),
-                  onTap: () {
-                    Navigator.pop(ctx);
-                    _switchQuality(quality);
-                  },
-                );
-              }),
-              const SizedBox(height: 12),
-            ],
+                ),
+              ],
+            ),
           ),
         );
       },
