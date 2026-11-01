@@ -399,13 +399,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           builder: (context, constraints) {
             switch (_viewMode) {
               case HomeViewMode.largeIcons:
-                final count = (constraints.maxWidth / 220).floor().clamp(1, 6);
+                final count = (constraints.maxWidth / 180).floor().clamp(2, 6);
                 return GridView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
                   gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
                     crossAxisCount: count,
-                    mainAxisExtent: 180,
+                    mainAxisExtent: 155,
                     crossAxisSpacing: 10,
                     mainAxisSpacing: 10,
                   ),
@@ -1186,7 +1186,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             builder: (context, constraints) {
               switch (_viewMode) {
                 case HomeViewMode.largeIcons:
-                  final count = (constraints.maxWidth / 170).floor().clamp(1, 8);
+                  final count = (constraints.maxWidth / 170).floor().clamp(2, 8);
                   return GridView.builder(
                     shrinkWrap: true,
                     physics: const NeverScrollableScrollPhysics(),
@@ -1549,7 +1549,7 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
           builder: (context, constraints) {
             switch (_viewMode) {
               case HomeViewMode.largeIcons:
-                final count = (constraints.maxWidth / 190).floor().clamp(1, 6);
+                final count = (constraints.maxWidth / 170).floor().clamp(2, 6);
                 return GridView.builder(
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
@@ -1662,29 +1662,34 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
         child: Stack(
           children: [
             Padding(
-              padding: const EdgeInsets.all(12),
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  _buildLargeTypeIcon(account.type),
-                  const SizedBox(height: 8),
-                  Text(
-                    account.name,
-                    style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    textAlign: TextAlign.center,
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    isLocal ? '로컬 드라이브 및 내 폴더' : _getTypeDisplayName(account.type),
-                    style: TextStyle(
-                      fontSize: 11,
-                      color: isLocal ? Colors.tealAccent.shade100 : Colors.grey,
+              padding: const EdgeInsets.all(10),
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    _buildLargeTypeIcon(account.type),
+                    const SizedBox(height: 8),
+                    Text(
+                      account.name,
+                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.bold),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
                     ),
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                ],
+                    const SizedBox(height: 2),
+                    Text(
+                      isLocal ? '로컬 드라이브 및 내 폴더' : _getTypeDisplayName(account.type),
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: isLocal ? Colors.tealAccent.shade100 : Colors.grey,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      textAlign: TextAlign.center,
+                    ),
+                  ],
+                ),
               ),
             ),
             Positioned(
