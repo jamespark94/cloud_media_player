@@ -1326,9 +1326,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   // 1. 큰 아이콘 보기
   Widget _buildLargeIconsView(BuildContext context, double maxWidth) {
-    final count = (maxWidth / 220).floor().clamp(1, 6);
+    final count = (maxWidth / 170).floor().clamp(2, 6);
     return GridView.builder(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.fromLTRB(12, 12, 12, 24 + MediaQuery.of(context).padding.bottom),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: count,
         mainAxisExtent: 185,
@@ -1647,7 +1647,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget _buildSmallIconsView(BuildContext context, double maxWidth) {
     final count = (maxWidth / 260).floor().clamp(1, 4);
     return GridView.builder(
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.fromLTRB(12, 12, 12, 24 + MediaQuery.of(context).padding.bottom),
       gridDelegate: SliverGridDelegateWithFixedCrossAxisCount(
         crossAxisCount: count,
         mainAxisExtent: 68,
@@ -1854,7 +1854,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   // 3. 목록 보기
   Widget _buildListView(BuildContext context) {
     return ListView.separated(
-      padding: const EdgeInsets.symmetric(vertical: 6),
+      padding: EdgeInsets.fromLTRB(0, 6, 0, 24 + MediaQuery.of(context).padding.bottom),
       itemCount: _filteredItems.length,
       separatorBuilder: (context, index) => const Divider(height: 1, color: Colors.white10),
       itemBuilder: (context, index) {
@@ -1981,7 +1981,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget _buildDetailsView(BuildContext context, double maxWidth) {
     return SingleChildScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
-      padding: const EdgeInsets.all(12),
+      padding: EdgeInsets.fromLTRB(12, 12, 12, 24 + MediaQuery.of(context).padding.bottom),
       child: Container(
         decoration: BoxDecoration(
           color: const Color(0xFF161A24),
