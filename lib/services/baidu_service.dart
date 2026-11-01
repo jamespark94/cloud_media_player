@@ -338,6 +338,7 @@ class BaiduService extends CloudService {
       VideoQuality.q360p,
       VideoQuality.q480p,
       VideoQuality.q720p,
+      VideoQuality.q1080p,
       VideoQuality.original,
     ];
   }
@@ -350,6 +351,7 @@ class BaiduService extends CloudService {
   @override
   Future<void> prefetchQualities(MediaItem item, List<VideoQuality> qualities) async {
     for (final q in qualities) {
+      if (q.isOriginal) continue;
       try {
         await _resolveStreamUrl(item, q);
       } catch (_) {}
@@ -572,16 +574,18 @@ class BaiduService extends CloudService {
     List<String> qualities;
     if (quality != null) {
       if (quality == VideoQuality.q360p) {
-        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720'];
+        qualities = ['M3U8_AUTO_360'];
       } else if (quality == VideoQuality.q480p) {
-        qualities = ['M3U8_AUTO_480', 'M3U8_AUTO_360', 'M3U8_AUTO_720'];
+        qualities = ['M3U8_AUTO_480'];
       } else if (quality == VideoQuality.q720p) {
-        qualities = ['M3U8_AUTO_720', 'M3U8_AUTO_480', 'M3U8_AUTO_360'];
+        qualities = ['M3U8_AUTO_720'];
+      } else if (quality == VideoQuality.q1080p) {
+        qualities = ['M3U8_AUTO_1080'];
       } else {
-        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720'];
+        qualities = ['M3U8_AUTO_360'];
       }
     } else {
-      qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480', 'M3U8_AUTO_720'];
+      qualities = ['M3U8_AUTO_360'];
     }
 
     // 1차: 웹 클라이언트 (clienttype=0), 2차: 모바일 클라이언트 (clienttype=1)

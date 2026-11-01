@@ -284,6 +284,7 @@ class TeraBoxService extends CloudService {
       VideoQuality.q360p,
       VideoQuality.q480p,
       VideoQuality.q720p,
+      VideoQuality.q1080p,
       VideoQuality.original,
     ];
   }
@@ -296,6 +297,7 @@ class TeraBoxService extends CloudService {
   @override
   Future<void> prefetchQualities(MediaItem item, List<VideoQuality> qualities) async {
     for (final q in qualities) {
+      if (q.isOriginal) continue;
       try {
         await _resolveStreamUrl(item, q);
       } catch (_) {}
@@ -407,22 +409,29 @@ class TeraBoxService extends CloudService {
       // 3. 다운로드 API 폴백 시도 (fidlist JSON 문자열 규격)
       dlink = 'https://www.terabox.com/api/download?app_id=$appId&web=1&channel=dubox&clienttype=0&jsToken=${_cachedJsToken ?? ""}&fidlist=["$fsId"]';
     }
-    // 3. dlink 302 리다이렉트 최종 CDN URL 해석 (Pre-resolve)
+    // 3. dlink 302 리다이렉트 최종 CDN URL 다단계 해석 (Pre-resolve)
     String finalStreamUrl = dlink;
     try {
       final client = http.Client();
-      final request = http.Request('GET', Uri.parse(dlink))
-        ..followRedirects = false
-        ..headers.addAll({
-          'User-Agent': defaultUserAgent,
-          'Cookie': cookieHeader,
-          'Referer': 'https://www.terabox.com/',
-        });
+      var currentUrl = dlink;
+      for (int i = 0; i < 5; i++) {
+        final request = http.Request('GET', Uri.parse(currentUrl))
+          ..followRedirects = false
+          ..headers.addAll({
+            'User-Agent': defaultUserAgent,
+            'Cookie': cookieHeader,
+            'Referer': 'https://www.terabox.com/',
+            'Range': 'bytes=0-0',
+          });
 
-      final response = await client.send(request);
-      if (response.isRedirect && response.headers['location'] != null) {
-        finalStreamUrl = response.headers['location']!;
-        debugPrint('[TeraBoxService] 302 리다이렉트 CDN URL 해석 성공');
+        final response = await client.send(request);
+        if (response.isRedirect && response.headers['location'] != null) {
+          currentUrl = response.headers['location']!;
+          finalStreamUrl = currentUrl;
+          debugPrint('[TeraBoxService] 302 리다이렉트 ($i): $finalStreamUrl');
+        } else {
+          break;
+        }
       }
       client.close();
     } catch (e) {
@@ -438,18 +447,18 @@ class TeraBoxService extends CloudService {
     return finalStreamUrl;
   }
 
-  /// /api/streaming 비공식 API로부터 HLS 스트림 URL 획득
-  /// TeraBox 무료 계정은 360p만 무제한 제공되며, 480p/720p는 VIP 전용이거나 청크 전송이 차단되므로
-  /// 360p를 항상 안정적인 최우선 후보로 배치합니다.
+  /// /api/streaming 비공식 API로부터 요청한 화질의 HLS 스트림 URL 획득
   Future<String?> _fetchHlsStreamUrl(String filePath, String fsId, [VideoQuality? quality]) async {
     List<String> qualities;
     if (quality != null) {
       if (quality == VideoQuality.q360p) {
         qualities = ['M3U8_AUTO_360'];
       } else if (quality == VideoQuality.q480p) {
-        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_480'];
+        qualities = ['M3U8_AUTO_480'];
       } else if (quality == VideoQuality.q720p) {
-        qualities = ['M3U8_AUTO_360', 'M3U8_AUTO_720'];
+        qualities = ['M3U8_AUTO_720'];
+      } else if (quality == VideoQuality.q1080p) {
+        qualities = ['M3U8_AUTO_1080'];
       } else {
         qualities = ['M3U8_AUTO_360'];
       }
@@ -499,8 +508,8 @@ class TeraBoxService extends CloudService {
           final bodyBytes = await streamedRes.stream.toBytes();
           final bodyText = utf8.decode(bodyBytes, allowMalformed: true);
 
-          // 직접 #EXTM3U 플레이리스트를 반환하는 경우에만 스트림 URI 자체를 재생 소스로 사용
-          if (bodyText.contains('#EXTM3U')) {
+          // 직접 #EXTM3U 플레이리스트를 반환하는 경우에만 스트림 URI 자체를 재생 소스로 사용 (#EXTINF 세그먼트 검증)
+          if (bodyText.contains('#EXTM3U') && bodyText.contains('#EXTINF')) {
             return streamUri.toString();
           }
 
@@ -524,7 +533,7 @@ class TeraBoxService extends CloudService {
           } catch (_) {}
 
           // #EXTM3U가 아니고 유효한 URL도 없는 일반 HTML/에러 페이지인 경우 무시하고 다음 품질 시도
-          debugPrint('[TeraBoxService] HLS 응답에 #EXTM3U 또는 유효 URL 없음 (길이: ${bodyText.length})');
+          debugPrint('[TeraBoxService] HLS 응답에 #EXTM3U 세그먼트 또는 유효 URL 없음 (길이: ${bodyText.length})');
         }
       } catch (e) {
         debugPrint('[TeraBoxService] HLS 스트리밍 엔드포인트($q) 요청 실패: $e');

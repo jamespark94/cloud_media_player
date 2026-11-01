@@ -162,7 +162,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       await platform?.setProperty('cache-secs', '30');
       await platform?.setProperty('network-timeout', '15');
       await platform?.setProperty('force-seekable', 'yes');
-      await platform?.setProperty('hr-seek', 'default');
+      await platform?.setProperty('hr-seek', 'yes');
+      await platform?.setProperty('hr-seek-framedrop', 'yes');
       final hwValue = _isHwDec ? (Platform.isAndroid ? 'mediacodec' : 'auto') : 'no';
       await platform?.setProperty('hwdec', hwValue);
 
@@ -357,7 +358,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         await platform?.setProperty('cache-secs', '30');
         await platform?.setProperty('network-timeout', '15');
         await platform?.setProperty('force-seekable', 'yes');
-        await platform?.setProperty('hr-seek', 'default');
+        await platform?.setProperty('hr-seek', 'yes');
+        await platform?.setProperty('hr-seek-framedrop', 'yes');
 
         // HLS(.m3u8) 세그먼트 및 암호화 키 요청 시 인증 쿠키/헤더 유지용 demuxer-lavf-o 설정
         final streamHeaders = await widget.service.getStreamHeaders();
@@ -2324,7 +2326,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     required int token,
     required bool isFallbackToOriginal,
   }) async {
-    final standby = _createConfiguredPlayer();
+    final standby = Player(
+      configuration: const PlayerConfiguration(
+        bufferSize: 64 * 1024 * 1024,
+      ),
+    );
+    await _applyPlayerPlatformProperties(standby);
     final standbyCtrl = _createConfiguredController(standby);
 
     if (token != _switchQualityToken || !mounted) {
@@ -2341,9 +2348,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     await standby.setVolume(0.0);
     await standby.setRate(_playbackSpeed);
 
-    // 버퍼링 소요 시간(약 1~2초)을 고려한 선행 위치 지정
+    // 네트워크 버퍼링 소요 시간(1~2초)을 고려하여 충분한 선행 위치 지정
     final curPos = _player.state.position;
-    final targetStart = curPos + const Duration(milliseconds: 1500);
+    final leadMs = (2000 * _playbackSpeed).round();
+    final targetStart = curPos + Duration(milliseconds: leadMs);
 
     await standby.open(
       Media(
@@ -2372,7 +2380,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     posSub = standby.stream.position.listen((_) => checkReady());
     timeoutTimer = Timer(const Duration(seconds: 10), () {
       if (!readyCompleter.isCompleted) {
-        // 위치 진행은 안되었어도 너비가 생기고 버퍼링이 끝났으면 시도
         final hasWidth = standby.state.width != null && standby.state.width! > 0;
         final notBuffering = !standby.state.buffering;
         readyCompleter.complete(hasWidth && notBuffering);
@@ -2393,18 +2400,35 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     // 디먹서가 열린 시점에 새 플레이어에 자막 미리 재바인딩
     await _reapplySubtitleToPlayer(standby);
 
-    // 실시간 위치 정밀 동기화
-    final livePos = _player.state.position;
-    final standbyPos = standby.state.position;
-    if ((livePos - standbyPos).abs() > const Duration(milliseconds: 400)) {
+    if (token != _switchQualityToken || !mounted) {
+      if (_standbyPlayer == standby) _disposeStandbyPlayer();
+      return false;
+    }
+
+    // =========================================================================
+    // [프레임 싱크: 선행 파킹 후 랑데부 (Park & Rendezvous)]
+    // 움직이는 대상을 뒤쫓지 않고, standby를 미래 위치에 먼저 pause()로 파킹해 둔 뒤
+    // Primary 플레이어가 해당 프레임에 도달하는 찰나에 출발시킴
+    // =========================================================================
+    await standby.pause();
+    var parkedPos = standby.state.position;
+    var livePos = _player.state.position;
+
+    // standby가 livePos보다 뒤처졌거나 (오차 음수) 너무 먼 미래(>1200ms)인 경우
+    // 미래 시점(livePos + 600ms)으로 정밀 seek 후 다시 파킹
+    final diffMs = (parkedPos - livePos).inMilliseconds;
+    if (diffMs < 80 || diffMs > 1200) {
+      final targetSyncPos = livePos + Duration(milliseconds: (650 * _playbackSpeed).round());
       try {
-        await standby.seek(livePos);
-        // seek 후 디코더 플러시로 인한 깜빡임 방지: 다시 버퍼링 해제 대기
+        await standby.seek(targetSyncPos);
+        // hr-seek 디코딩 완료 대기 (최대 2초)
         await standby.stream.buffering.firstWhere((b) => !b).timeout(
           const Duration(seconds: 2),
           onTimeout: () => false,
         );
       } catch (_) {}
+      await standby.pause();
+      parkedPos = standby.state.position;
     }
 
     if (token != _switchQualityToken || !mounted) {
@@ -2412,7 +2436,32 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       return false;
     }
 
-    // 1단계: 스탠바이 위젯 불투명도를 1.0으로 먼저 전환 (오버레이로 화면을 덮음)
+    // 랑데부(Rendezvous) 카운트다운:
+    // standby는 parkedPos 프레임이 비디오 버퍼에 디코딩된 채 멈춰있고,
+    // _player는 livePos에서 parkedPos를 향해 정상 재생 중임
+    // 30ms는 standby.play() 호출 후 하드웨어 오디오/비디오 출력 파이프라인 기상 지연 보정치
+    const leadWakeup = Duration(milliseconds: 30);
+    final targetHitPos = parkedPos > leadWakeup ? parkedPos - leadWakeup : parkedPos;
+
+    final maxWaitWatch = Stopwatch()..start();
+    while (mounted && token == _switchQualityToken && _player.state.playing) {
+      final currentLive = _player.state.position;
+      if (currentLive >= targetHitPos) {
+        break;
+      }
+      if (maxWaitWatch.elapsedMilliseconds > 2000) {
+        // 안전장치: 최대 2초 초과 시 루프 탈출
+        break;
+      }
+      await Future.delayed(const Duration(milliseconds: 16));
+    }
+
+    if (token != _switchQualityToken || !mounted) {
+      if (_standbyPlayer == standby) _disposeStandbyPlayer();
+      return false;
+    }
+
+    // 1단계: 스탠바이 위젯 불투명도를 1.0으로 먼저 전환 (화면 덮음)
     if (mounted) {
       setState(() {
         _isStandbyFrameReady = true;
@@ -2427,16 +2476,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       return false;
     }
 
-    // 2단계 [핫스왑 수행]: 소리 및 컨트롤러 즉각 교체 (검은 화면 0초)
+    // 2단계 [핫스왑 수행]: 오디오 선차단 및 무지연 동시 전환 (Zero-Overlap Audio Handoff)
     final oldPlayer = _player;
     final oldProxyUrl = _activeProxyStreamUrl;
+    final wasPlaying = oldPlayer.state.playing;
 
-    await standby.setVolume(100.0);
-    if (!oldPlayer.state.playing) {
-      await standby.pause();
-    }
-    await oldPlayer.setVolume(0.0);
-    await oldPlayer.pause();
+    // 구 플레이어 소리를 즉시 끄면서 새 플레이어 재생 및 볼륨 병렬 실행
+    await Future.wait([
+      oldPlayer.setVolume(0.0),
+      if (wasPlaying) standby.play(),
+      standby.setVolume(100.0),
+    ]);
+    oldPlayer.pause().catchError((_) {});
 
     _player = standby;
     _controller = standbyCtrl;
@@ -2459,16 +2510,22 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         _isSwitchingQuality = false;
       });
 
+      final actualW = _player.state.width;
+      final actualH = _player.state.height;
+      final resInfo = (actualW != null && actualH != null && actualW > 0 && actualH > 0)
+          ? ' (${actualW}x$actualH)'
+          : '';
+
       if (isFallbackToOriginal) {
         _showNotificationBanner(
-          message: '선택한 화질(${targetQuality.label})을 지원하지 않아 원본으로 재생됩니다.',
+          message: '선택한 화질(${targetQuality.label})을 지원하지 않아 원본$resInfo으로 재생됩니다.',
           icon: Icons.warning_amber_rounded,
           iconColor: Colors.orangeAccent,
           duration: const Duration(seconds: 4),
         );
       } else {
         _showNotificationBanner(
-          message: '화질 전환 완료: ${targetQuality.label}',
+          message: '화질 전환 완료: ${targetQuality.label}$resInfo',
           icon: Icons.check_circle_outline,
           iconColor: Colors.greenAccent,
           duration: const Duration(seconds: 2),
