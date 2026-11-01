@@ -252,25 +252,33 @@ class _BrowserScreenState extends State<BrowserScreen> {
       },
       child: Scaffold(
         appBar: AppBar(
-          title: Row(
+          titleSpacing: 0,
+          title: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              _buildCloudIcon(widget.account.type),
-              const SizedBox(width: 8),
-              Flexible(
-                child: Text(
-                  widget.account.name,
-                  style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-                  overflow: TextOverflow.ellipsis,
-                ),
+              Text(
+                _folderStack.length > 1 ? currentFolderName : widget.account.name,
+                style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
               ),
-              if (_folderStack.length > 1) ...[
-                const SizedBox(width: 8),
-                Text(
-                  '• $currentFolderName',
-                  style: const TextStyle(fontSize: 13, color: Colors.amber, fontWeight: FontWeight.w600),
-                  overflow: TextOverflow.ellipsis,
-                ),
-              ],
+              const SizedBox(height: 2),
+              Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  _buildCloudIcon(widget.account.type, size: 13),
+                  const SizedBox(width: 4),
+                  Flexible(
+                    child: Text(
+                      widget.account.name,
+                      style: const TextStyle(fontSize: 11, color: Colors.white60),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                  ),
+                ],
+              ),
             ],
           ),
           leading: IconButton(
@@ -285,12 +293,12 @@ class _BrowserScreenState extends State<BrowserScreen> {
             },
           ),
           actions: [
-            // 윈도우 탐색기 스타일 보기 옵션 드롭다운 메뉴
+            // 윈도우 탐색기 스타일 보기 옵션 드롭다운 메뉴 (컴팩트 아이콘 모드)
             PopupMenuButton<BrowserViewMode>(
               tooltip: '보기 옵션 (${_viewMode.label})',
               onSelected: _changeViewMode,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 5),
                 margin: const EdgeInsets.symmetric(vertical: 8),
                 decoration: BoxDecoration(
                   color: Colors.white.withAlpha(15),
@@ -301,13 +309,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   mainAxisSize: MainAxisSize.min,
                   children: [
                     Icon(_viewMode.icon, size: 18, color: Colors.blueAccent),
-                    const SizedBox(width: 6),
-                    Text(
-                      _viewMode.label,
-                      style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600),
-                    ),
                     const SizedBox(width: 2),
-                    const Icon(Icons.arrow_drop_down, size: 18, color: Colors.white70),
+                    const Icon(Icons.arrow_drop_down, size: 16, color: Colors.white70),
                   ],
                 ),
               ),
@@ -338,20 +341,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 );
               }).toList(),
             ),
-            const SizedBox(width: 4),
-            // 새 폴더 생성 버튼
-            IconButton(
-              icon: const Icon(Icons.create_new_folder_outlined),
-              tooltip: '새 폴더 생성',
-              onPressed: _promptCreateFolder,
-            ),
-            // 클라우드 최상위(홈) 바로가기 버튼
-            if (_folderStack.length > 1)
-              IconButton(
-                icon: const Icon(Icons.drive_folder_upload_outlined),
-                tooltip: '클라우드 홈(최상위)으로 이동',
-                onPressed: () => _navigateToIndex(0),
-              ),
             if (_folderStack.length > 1)
               Consumer<FolderShortcutManager>(
                 builder: (context, shortcutMgr, _) {
@@ -396,16 +385,70 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   );
                 },
               ),
-            if (widget.account.type == CloudType.local)
-              IconButton(
-                icon: const Icon(Icons.sd_card_outlined),
-                tooltip: '저장소 / SD 카드 직접 추가',
-                onPressed: _pickAndAddCustomStorage,
-              ),
-            IconButton(
-              icon: const Icon(Icons.refresh),
-              tooltip: '새로고침 / 저장소 다시 감지',
-              onPressed: _loadFolder,
+            // 추가 액션 메뉴 (새 폴더 생성, 최상위 홈 이동, SD카드 추가, 새로고침 등)
+            PopupMenuButton<String>(
+              tooltip: '더보기',
+              icon: const Icon(Icons.more_vert),
+              onSelected: (value) async {
+                switch (value) {
+                  case 'create_folder':
+                    _promptCreateFolder();
+                    break;
+                  case 'go_home':
+                    _navigateToIndex(0);
+                    break;
+                  case 'add_storage':
+                    _pickAndAddCustomStorage();
+                    break;
+                  case 'refresh':
+                    _loadFolder();
+                    break;
+                }
+              },
+              itemBuilder: (context) => [
+                const PopupMenuItem(
+                  value: 'create_folder',
+                  child: Row(
+                    children: [
+                      Icon(Icons.create_new_folder_outlined, size: 20),
+                      SizedBox(width: 12),
+                      Text('새 폴더 생성'),
+                    ],
+                  ),
+                ),
+                if (_folderStack.length > 1)
+                  const PopupMenuItem(
+                    value: 'go_home',
+                    child: Row(
+                      children: [
+                        Icon(Icons.drive_folder_upload_outlined, size: 20),
+                        SizedBox(width: 12),
+                        Text('클라우드 홈(최상위) 이동'),
+                      ],
+                    ),
+                  ),
+                if (widget.account.type == CloudType.local)
+                  const PopupMenuItem(
+                    value: 'add_storage',
+                    child: Row(
+                      children: [
+                        Icon(Icons.sd_card_outlined, size: 20),
+                        SizedBox(width: 12),
+                        Text('저장소 / SD 카드 직접 추가'),
+                      ],
+                    ),
+                  ),
+                const PopupMenuItem(
+                  value: 'refresh',
+                  child: Row(
+                    children: [
+                      Icon(Icons.refresh, size: 20),
+                      SizedBox(width: 12),
+                      Text('새로고침 / 다시 감지'),
+                    ],
+                  ),
+                ),
+              ],
             ),
           ],
           bottom: PreferredSize(
@@ -2395,7 +2438,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
-  Widget _buildCloudIcon(CloudType type) {
+  Widget _buildCloudIcon(CloudType type, {double size = 20}) {
     IconData icon;
     Color color;
     switch (type) {
@@ -2440,6 +2483,6 @@ class _BrowserScreenState extends State<BrowserScreen> {
         color = Colors.redAccent;
         break;
     }
-    return Icon(icon, color: color, size: 20);
+    return Icon(icon, color: color, size: size);
   }
 }
