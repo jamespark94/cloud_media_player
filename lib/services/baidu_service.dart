@@ -20,6 +20,10 @@ class BaiduService extends CloudService {
   // Stream URL 캐시 (fsId -> {url, expiry})
   final Map<String, ({String url, DateTime expiry})> _streamUrlCache = {};
 
+  // pan.baidu.com api/streaming 엔드포인트의 errno -6 (권한 없음) 연속 발생 상태 캐시
+  // 연속 2회 이상 발생 시 불필요한 왕복 지연을 방지하고 고속 PCS 엔드포인트로 즉각 우회
+  DateTime? _panStreamingUnavailableUntil;
+
   /// Baidu 쿠키 문자열 정규화
   /// BDUSS 단독 값 또는 'BDUSS=xxx; STOKEN=yyy; ...' 형태 전체 헤더 문자열 지원
   static String normalizeBaiduCookie(String raw) {
@@ -518,11 +522,6 @@ class BaiduService extends CloudService {
 
     // 1. 후보 스트림 URL 목록 수집
     final candidateUrls = <String>[];
-    try {
-      final streamUrl = await getStreamUrl(item);
-      if (streamUrl.isNotEmpty) candidateUrls.add(streamUrl);
-    } catch (_) {}
-
     if (filePath.isNotEmpty) {
       candidateUrls.add(
         'https://d.pcs.baidu.com/rest/2.0/pcs/file?method=download&app_id=$appId&path=${Uri.encodeComponent(filePath)}',
@@ -532,6 +531,15 @@ class BaiduService extends CloudService {
       candidateUrls.add(
         'https://pan.baidu.com/api/download?app_id=$appId&web=1&channel=chunlei&clienttype=0&jsToken=${_cachedJsToken ?? ""}&fidlist=[$fsId]',
       );
+    }
+    // 자막이 아닌 일반 미디어인 경우에만 추가 폴백으로 getStreamUrl 시도 (불필요한 HLS 변환 및 302 리다이렉트 지연 방지)
+    if (!item.isSubtitle) {
+      try {
+        final streamUrl = await getStreamUrl(item);
+        if (streamUrl.isNotEmpty && !candidateUrls.contains(streamUrl)) {
+          candidateUrls.add(streamUrl);
+        }
+      } catch (_) {}
     }
 
     // 2. 다중 헤더 및 URL 조합으로 다운로드 시도
@@ -569,7 +577,7 @@ class BaiduService extends CloudService {
     throw Exception('Baidu 파일 다운로드 실패: 모든 엔드포인트 거부 (403)');
   }
 
-  /// /api/streaming API로부터 HLS 스트림 URL 획득 시도
+  /// /api/streaming 또는 PCS streaming API로부터 HLS 스트림 URL 획득 시도
   Future<String?> _fetchHlsStreamUrl(String filePath, String fsId, [VideoQuality? quality]) async {
     List<String> qualities;
     if (quality != null) {
@@ -588,87 +596,7 @@ class BaiduService extends CloudService {
       qualities = ['M3U8_AUTO_360'];
     }
 
-    // 1차: 웹 클라이언트 (clienttype=0), 2차: 모바일 클라이언트 (clienttype=1)
-    final clientConfigs = [
-      {'clienttype': '0', 'channel': 'chunlei', 'web': '1'},
-      {'clienttype': '1', 'channel': 'baiduyun', 'web': '0'},
-    ];
-
-    for (final cfg in clientConfigs) {
-      for (final q in qualities) {
-        final query = <String, String>{
-          'app_id': appId,
-          'web': cfg['web']!,
-          'channel': cfg['channel']!,
-          'clienttype': cfg['clienttype']!,
-          'isplayer': '1',
-          'check_blue': '1',
-          'type': q,
-          'path': filePath,
-          'vip': '0',
-          if (fsId.isNotEmpty) 'fsid': fsId,
-          if (cfg['clienttype'] == '0' && _cachedJsToken != null && _cachedJsToken!.isNotEmpty)
-            'jsToken': _cachedJsToken!,
-        };
-
-        final streamUri = Uri.parse('https://pan.baidu.com/api/streaming').replace(
-          queryParameters: query,
-        );
-
-        final client = http.Client();
-        try {
-          final req = http.Request('GET', streamUri)
-            ..followRedirects = false
-            ..headers.addAll({
-              'User-Agent': defaultUserAgent,
-              'Cookie': cookieHeader,
-              'Referer': 'https://pan.baidu.com/disk/main',
-              'Accept': '*/*',
-            });
-
-          final streamedRes = await client.send(req);
-
-          if (streamedRes.isRedirect && streamedRes.headers['location'] != null) {
-            final location = streamedRes.headers['location']!;
-            if (location.isNotEmpty) {
-              return location;
-            }
-          }
-
-          if (streamedRes.statusCode == 200) {
-            final bodyBytes = await streamedRes.stream.toBytes();
-            final bodyText = utf8.decode(bodyBytes, allowMalformed: true);
-
-            if (bodyText.contains('#EXTM3U')) {
-              return streamUri.toString();
-            }
-
-            try {
-              final json = jsonDecode(bodyText);
-              if (json is Map) {
-                if (json['errno'] != null && json['errno'] != 0) {
-                  debugPrint('[BaiduService] HLS 응답 errno: ${json['errno']} (type: $q, client: ${cfg['clienttype']}, body: $bodyText)');
-                  continue;
-                }
-                final directM3u8 = json['url'] ??
-                    json['m3u8'] ??
-                    json['m3u8_url'] ??
-                    json['streaming_url'] ??
-                    json['dlink'];
-                if (directM3u8 != null && directM3u8.toString().isNotEmpty) {
-                  return directM3u8.toString();
-                }
-              }
-            } catch (_) {}
-          }
-        } catch (e) {
-          debugPrint('[BaiduService] HLS 스트리밍 엔드포인트($q) 요청 실패: $e');
-        } finally {
-          client.close();
-        }
-      }
-    }
-    // 3차: PCS REST streaming API 시도 (BDUSS 전용 고속 엔드포인트)
+    // 1차 우선: PCS REST streaming API 시도 (BDUSS 전용 고속 엔드포인트 - errno -6 왕복 지연 13초 방지)
     for (final q in qualities) {
       final pcsStreamingUri = Uri.parse(
         'https://d.pcs.baidu.com/rest/2.0/pcs/file?method=streaming&app_id=$appId&path=${Uri.encodeComponent(filePath)}&type=$q',
@@ -683,7 +611,7 @@ class BaiduService extends CloudService {
             'Cookie': cookieHeader,
           });
 
-        final streamedRes = await client.send(req);
+        final streamedRes = await client.send(req).timeout(const Duration(seconds: 7));
 
         if (streamedRes.isRedirect && streamedRes.headers['location'] != null) {
           final location = streamedRes.headers['location']!;
@@ -694,7 +622,7 @@ class BaiduService extends CloudService {
         }
 
         if (streamedRes.statusCode == 200) {
-          final bodyBytes = await streamedRes.stream.toBytes();
+          final bodyBytes = await streamedRes.stream.toBytes().timeout(const Duration(seconds: 7));
           final bodyText = utf8.decode(bodyBytes, allowMalformed: true);
           if (bodyText.contains('#EXTM3U')) {
             debugPrint('[BaiduService] PCS HLS 플레이리스트 획득 성공 ($q)');
@@ -705,6 +633,104 @@ class BaiduService extends CloudService {
         debugPrint('[BaiduService] PCS HLS 요청 실패 ($q): $e');
       } finally {
         client.close();
+      }
+    }
+
+    // 2차 폴백: pan.baidu.com api/streaming 시도
+    final isPanStreamingTemporarilyDisabled = _panStreamingUnavailableUntil != null &&
+        DateTime.now().isBefore(_panStreamingUnavailableUntil!);
+
+    if (!isPanStreamingTemporarilyDisabled) {
+      final clientConfigs = [
+        {'clienttype': '0', 'channel': 'chunlei', 'web': '1'},
+        {'clienttype': '1', 'channel': 'baiduyun', 'web': '0'},
+      ];
+
+      for (final cfg in clientConfigs) {
+        for (final q in qualities) {
+          final query = <String, String>{
+            'app_id': appId,
+            'web': cfg['web']!,
+            'channel': cfg['channel']!,
+            'clienttype': cfg['clienttype']!,
+            'isplayer': '1',
+            'check_blue': '1',
+            'type': q,
+            'path': filePath,
+            'vip': '0',
+            if (fsId.isNotEmpty) 'fsid': fsId,
+            if (cfg['clienttype'] == '0' && _cachedJsToken != null && _cachedJsToken!.isNotEmpty)
+              'jsToken': _cachedJsToken!,
+          };
+
+          final streamUri = Uri.parse('https://pan.baidu.com/api/streaming').replace(
+            queryParameters: query,
+          );
+
+          final client = http.Client();
+          try {
+            final req = http.Request('GET', streamUri)
+              ..followRedirects = false
+              ..headers.addAll({
+                'User-Agent': defaultUserAgent,
+                'Cookie': cookieHeader,
+                'Referer': 'https://pan.baidu.com/disk/main',
+                'Accept': '*/*',
+              });
+
+            final streamedRes = await client.send(req).timeout(const Duration(seconds: 6));
+
+            if (streamedRes.isRedirect && streamedRes.headers['location'] != null) {
+              final location = streamedRes.headers['location']!;
+              if (location.isNotEmpty) {
+                return location;
+              }
+            }
+
+            if (streamedRes.statusCode == 200) {
+              final bodyBytes = await streamedRes.stream.toBytes().timeout(const Duration(seconds: 6));
+              final bodyText = utf8.decode(bodyBytes, allowMalformed: true);
+
+              if (bodyText.contains('#EXTM3U')) {
+                return streamUri.toString();
+              }
+
+              try {
+                final json = jsonDecode(bodyText);
+                if (json is Map) {
+                  if (json['errno'] != null && json['errno'] != 0) {
+                    debugPrint('[BaiduService] HLS 응답 errno: ${json['errno']} (type: $q, client: ${cfg['clienttype']}, body: $bodyText)');
+                    if (json['errno'] == -6) {
+                      _panStreamingUnavailableUntil = DateTime.now().add(const Duration(minutes: 30));
+                      debugPrint('[BaiduService] errno -6 감지: 향후 30분간 PCS 엔드포인트로 즉시 우회');
+                    }
+                    continue;
+                  }
+                  final directM3u8 = json['url'] ??
+                      json['m3u8'] ??
+                      json['m3u8_url'] ??
+                      json['streaming_url'] ??
+                      json['dlink'];
+                  if (directM3u8 != null && directM3u8.toString().isNotEmpty) {
+                    return directM3u8.toString();
+                  }
+                }
+              } catch (_) {}
+            }
+          } catch (e) {
+            debugPrint('[BaiduService] HLS 스트리밍 엔드포인트($q) 요청 실패: $e');
+          } finally {
+            client.close();
+          }
+
+          if (_panStreamingUnavailableUntil != null && DateTime.now().isBefore(_panStreamingUnavailableUntil!)) {
+            break;
+          }
+        }
+
+        if (_panStreamingUnavailableUntil != null && DateTime.now().isBefore(_panStreamingUnavailableUntil!)) {
+          break;
+        }
       }
     }
 

@@ -160,6 +160,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       await platform?.setProperty('demuxer-readahead-secs', '30'); // 30초 선행 버퍼링
       await platform?.setProperty('cache', 'yes');
       await platform?.setProperty('cache-secs', '30');
+      try {
+        final cacheDir = Directory('${Directory.systemTemp.path}/mpv_cache');
+        if (!cacheDir.existsSync()) cacheDir.createSync(recursive: true);
+        await platform?.setProperty('cache-dir', cacheDir.path);
+      } catch (_) {}
       await platform?.setProperty('network-timeout', '15');
       await platform?.setProperty('force-seekable', 'yes');
       await platform?.setProperty('hr-seek', 'yes');
@@ -356,6 +361,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         await platform?.setProperty('demuxer-readahead-secs', '30'); // 30초 선행 버퍼링
         await platform?.setProperty('cache', 'yes');
         await platform?.setProperty('cache-secs', '30');
+        try {
+          final cacheDir = Directory('${Directory.systemTemp.path}/mpv_cache');
+          if (!cacheDir.existsSync()) cacheDir.createSync(recursive: true);
+          await platform?.setProperty('cache-dir', cacheDir.path);
+        } catch (_) {}
         await platform?.setProperty('network-timeout', '15');
         await platform?.setProperty('force-seekable', 'yes');
         await platform?.setProperty('hr-seek', 'yes');
@@ -371,9 +381,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         }
       } catch (_) {}
 
-      // 2. 외부 자막 사전 탐색 및 다운로드 (재생 도중 네트워크 대역폭 잠식 및 디먹서 3회 재시작 방지)
+      // 2. 외부 자막 사전 탐색 및 다운로드
+      // 로컬에 이미 캐시된 자막이 있으면 즉시 바인딩 준비하고,
+      // 네트워크 다운로드가 필요한 자막은 비디오 재생(player.open)을 차단하지 않도록 백그라운드로 처리
       File? initialSubtitleFile;
       String? initialSubtitleName;
+      bool needBackgroundSubtitleDownload = false;
 
       if (_currentSubtitleType == 'cloud' && _currentSubtitleId != null) {
         final cached = _getSafeSubtitleCacheFile(_currentSubtitleId!, _currentSubtitleName);
@@ -381,33 +394,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           initialSubtitleFile = cached;
           initialSubtitleName = _currentSubtitleName;
         } else {
-          // 타 기기에서 동기화되어 로컬 캐시가 없는 경우: 재생 시작 전 즉시 온디맨드 다운로드
-          try {
-            MediaItem? subToDownload;
-            final parentId = widget.item.parentId ?? record?.parentId;
-            if (parentId != null && parentId.isNotEmpty) {
-              final items = await widget.service.listItems(folderId: parentId);
-              subToDownload = items.cast<MediaItem?>().firstWhere(
-                (it) => it != null && it.isSubtitle && (it.id == _currentSubtitleId || (_currentSubtitleName != null && it.name == _currentSubtitleName)),
-                orElse: () => null,
-              );
-            }
-            subToDownload ??= MediaItem(
-              id: _currentSubtitleId!,
-              name: _currentSubtitleName ?? 'subtitle',
-              parentId: parentId,
-              isFolder: false,
-            );
-
-            final downloadedFile = await _downloadAndNormalizeSubtitle(subToDownload, targetFile: cached);
-            if (downloadedFile != null && downloadedFile.existsSync() && downloadedFile.lengthSync() > 0) {
-              initialSubtitleFile = downloadedFile;
-              initialSubtitleName = _currentSubtitleName ?? subToDownload.name;
-              _currentSubtitleId = subToDownload.id;
-            }
-          } catch (e) {
-            debugPrint('클라우드 자막 온디맨드 다운로드 실패: $e');
-          }
+          needBackgroundSubtitleDownload = true;
         }
       } else if (_currentSubtitleType == 'local' && _currentSubtitleId != null) {
         final local = File(_currentSubtitleId!);
@@ -416,24 +403,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           initialSubtitleName = _currentSubtitleName;
         }
       } else if (_currentSubtitleType == null && widget.item.parentId != null) {
-        try {
-          final items = await widget.service.listItems(folderId: widget.item.parentId!);
-          final videoName = widget.item.name;
-          final matchingSubs = items.where((it) => it.isSubtitle && SubtitleUtils.isSubtitleForVideo(it.name, videoName)).toList();
-          if (matchingSubs.isNotEmpty) {
-            matchingSubs.sort((a, b) => SubtitleUtils.koreanScore(b.name).compareTo(SubtitleUtils.koreanScore(a.name)));
-            final selectedSub = matchingSubs.first;
-            final downloadedFile = await _downloadAndNormalizeSubtitle(selectedSub);
-            if (downloadedFile != null && downloadedFile.existsSync() && downloadedFile.lengthSync() > 0) {
-              initialSubtitleFile = downloadedFile;
-              initialSubtitleName = selectedSub.name;
-              _currentSubtitleType = 'cloud';
-              _currentSubtitleId = selectedSub.id;
-              _currentSubtitleName = selectedSub.name;
-              _currentSubtitleLanguage = 'ko';
-            }
-          }
-        } catch (_) {}
+        needBackgroundSubtitleDownload = true;
       }
 
       // 3. 바이두/테라박스 스트리밍:
@@ -463,7 +433,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
 
       // Baidu/TeraBox HLS 및 네이버 MYBOX(단기 유효 서명 토큰/Range 문제 해결)는 LocalStreamProxy 경유
       final playUrl = ((isBaiduOrTeraBox && isHls) || isNaver || isMega)
-          ? LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: defaultQuality)
+          ? LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: defaultQuality, initialUrl: isMega ? null : rawStreamUrl)
           : rawStreamUrl;
       final headers = ((isBaiduOrTeraBox && isHls) || isNaver || isMega) ? <String, String>{} : rawHeaders;
       if (playUrl.contains('127.0.0.1')) {
@@ -472,13 +442,27 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         _activeProxyStreamUrl = null;
       }
 
-      // 다른 가용 화질(480p, 720p 등)을 백그라운드에서 사전 프리페치
+      // 다른 가용 화질(480p, 720p 등)은 재생 시작 직후의 네트워크 및 쿠키 병목을 방지하기 위해
+      // 실제 재생이 안정화된 시점(position > 3초) 10초 뒤에 지연 프리페치
       if (qualities.length > 1) {
-        widget.service.prefetchQualities(
-          widget.item,
-          qualities.where((q) => q != defaultQuality).toList(),
-        );
+        StreamSubscription? prefetchSub;
+        prefetchSub = _player.stream.position.listen((pos) {
+          if (pos > const Duration(seconds: 3)) {
+            prefetchSub?.cancel();
+            Future.delayed(const Duration(seconds: 10), () {
+              if (!mounted) return;
+              widget.service.prefetchQualities(
+                widget.item,
+                qualities.where((q) => q != defaultQuality).toList(),
+              );
+            });
+          }
+        });
       }
+
+      // mpv 내부 에러/로그 수집 (프록시 응답을 mpv가 어떻게 해석하는지 진단)
+      _player.stream.error.listen((e) => debugPrint('[PlayerScreen] mpv error: $e'));
+      _player.stream.log.listen((l) => debugPrint('[mpv] ${l.prefix}: ${l.text}'));
 
       debugPrint('[PlayerScreen] 스트림 오픈 시작 (isHls: $isHls, isFallback: $isFallbackToOriginal, quality: ${_currentQuality.label}): $playUrl');
 
@@ -546,6 +530,61 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         _restoreOrAutoLoadSubtitle();
       }
 
+      // 5-1. 온디맨드 자막 다운로드가 필요한 경우 백그라운드 비동기 다운로드 및 완료 후 자동 연결
+      if (needBackgroundSubtitleDownload) {
+        () async {
+          try {
+            MediaItem? subToDownload;
+            final parentId = widget.item.parentId ?? record?.parentId;
+            if (parentId != null && parentId.isNotEmpty) {
+              final items = await widget.service.listItems(folderId: parentId);
+              if (_currentSubtitleType == 'cloud' && _currentSubtitleId != null) {
+                subToDownload = items.cast<MediaItem?>().firstWhere(
+                  (it) => it != null && it.isSubtitle && (it.id == _currentSubtitleId || (_currentSubtitleName != null && it.name == _currentSubtitleName)),
+                  orElse: () => null,
+                );
+              } else if (_currentSubtitleType == null) {
+                final videoName = widget.item.name;
+                final matchingSubs = items.where((it) => it.isSubtitle && SubtitleUtils.isSubtitleForVideo(it.name, videoName)).toList();
+                if (matchingSubs.isNotEmpty) {
+                  matchingSubs.sort((a, b) => SubtitleUtils.koreanScore(b.name).compareTo(SubtitleUtils.koreanScore(a.name)));
+                  subToDownload = matchingSubs.first;
+                }
+              }
+            }
+
+            if (subToDownload != null) {
+              final downloaded = await _downloadAndNormalizeSubtitle(subToDownload);
+              if (downloaded != null && downloaded.existsSync() && downloaded.lengthSync() > 0 && mounted) {
+                _activeExternalSubtitleFile = downloaded;
+                _currentSubtitleType = 'cloud';
+                _currentSubtitleId = subToDownload.id;
+                _currentSubtitleName = subToDownload.name;
+                _currentSubtitleLanguage = 'ko';
+                _saveCurrentPosition();
+
+                final subTrack = SubtitleTrack.uri(
+                  downloaded.path,
+                  title: subToDownload.name,
+                  language: 'ko',
+                );
+                await _player.setSubtitleTrack(subTrack);
+                _hasAutoSelectedSubtitle = true;
+
+                _showNotificationBanner(
+                  message: '한국어 자막 자동 적용: ${subToDownload.name}',
+                  icon: Icons.subtitles,
+                  iconColor: Colors.amber,
+                  duration: const Duration(seconds: 3),
+                );
+              }
+            }
+          } catch (e) {
+            debugPrint('[PlayerScreen] 백그라운드 자막 다운로드 실패: $e');
+          }
+        }();
+      }
+
       // 6. 로딩 스피너 탈출 안전장치: duration뿐 아니라 buffering 또는 playing 상태 감지 시 즉시 로딩 해제
       _player.stream.buffering.firstWhere((b) => !b).timeout(
         const Duration(seconds: 2),
@@ -568,9 +607,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         );
         if (d > Duration.zero && mounted) {
           setState(() => _totalDuration = d);
-          if (resumePos != null && !_hasResumed && _player.state.position < const Duration(seconds: 3)) {
-            _hasResumed = true;
-            await _player.seek(resumePos);
+          // start: resumePos로 이미 지정되어 있으므로, 실제 재생 시작(position > 0) 확인 후 필요한 경우에만 보조 seek
+          if (resumePos != null && !_hasResumed && _player.state.position < const Duration(seconds: 1)) {
+            () async {
+              try {
+                await _player.stream.position.firstWhere((p) => p > Duration.zero).timeout(const Duration(seconds: 3));
+                if (!_hasResumed && mounted && _player.state.position < const Duration(seconds: 3)) {
+                  _hasResumed = true;
+                  await _safeSeek(resumePos);
+                }
+              } catch (_) {}
+            }();
           }
         }
       } catch (_) {}
@@ -604,7 +651,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           _currentSubtitleLanguage = record.subtitleLanguage;
         }
 
-        final streamUrl = LocalStreamProxy.instance.registerStream(widget.service, widget.item);
+        final streamUrl = LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: _currentQuality);
         await _player.open(
           Media(
             streamUrl,
@@ -621,9 +668,16 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           );
           if (d > Duration.zero && mounted) {
             setState(() => _totalDuration = d);
-            if (resumePos != null && !_hasResumed && _player.state.position < const Duration(seconds: 3)) {
-              _hasResumed = true;
-              await _player.seek(resumePos);
+            if (resumePos != null && !_hasResumed && _player.state.position < const Duration(seconds: 1)) {
+              () async {
+                try {
+                  await _player.stream.position.firstWhere((p) => p > Duration.zero).timeout(const Duration(seconds: 3));
+                  if (!_hasResumed && mounted && _player.state.position < const Duration(seconds: 3)) {
+                    _hasResumed = true;
+                    await _safeSeek(resumePos);
+                  }
+                } catch (_) {}
+              }();
             }
           }
         } catch (_) {}
