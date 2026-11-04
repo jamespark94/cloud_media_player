@@ -19,7 +19,6 @@ class LocalStreamProxy {
   LocalStreamProxy._();
 
   final http.Client _segmentClient = http.Client();
-  final _Gate _segmentGate = _Gate(2);
 
   // Active streaming session registry
   final Map<String, _ActiveStream> _sessions = {};
@@ -271,7 +270,6 @@ class LocalStreamProxy {
 
     final session = _sessions[sessionId]!;
     final sw = Stopwatch()..start();
-    http.Client? client;
     try {
       final headers = await session.service.getStreamHeaders();
 
@@ -308,10 +306,10 @@ class LocalStreamProxy {
         } catch (_) {}
       }
 
-      // 동시 요청 수 제한 + 짧은 타임아웃(3.5~5초) + 백업 CDN(backhost) 자동 전환 재시도
+      // 세션별 동시 요청 수 제한 + 짧은 타임아웃(4~5초) + 백업 CDN(backhost) 자동 전환 재시도
       http.StreamedResponse? proxyResMaybe;
       Object? lastErr;
-      await _segmentGate.acquire();
+      await session.segmentGate.acquire();
       try {
         for (var attempt = 1; attempt <= 3; attempt++) {
           Uri targetUri = uriParsed;
@@ -359,7 +357,7 @@ class LocalStreamProxy {
           }
         }
       } finally {
-        _segmentGate.release();
+        session.segmentGate.release();
       }
       if (proxyResMaybe == null) throw lastErr ?? TimeoutException('upstream');
       final proxyRes = proxyResMaybe;
@@ -435,8 +433,6 @@ class LocalStreamProxy {
         request.response.statusCode = HttpStatus.badGateway;
         await request.response.close();
       } catch (_) {}
-    } finally {
-      client?.close();
     }
   }
 
@@ -507,6 +503,7 @@ class _ActiveStream {
   final CloudService service;
   final MediaItem item;
   final VideoQuality? quality;
+  final _Gate segmentGate = _Gate(3);
   String? cachedStreamUrl;
   DateTime? streamUrlExpiry;
   String? cachedM3u8Body;

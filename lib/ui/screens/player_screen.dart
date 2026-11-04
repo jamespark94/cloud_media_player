@@ -2328,33 +2328,48 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       final isFallbackToOriginal = !targetQuality.isOriginal && !isHls;
       final effectiveQuality = isFallbackToOriginal ? VideoQuality.original : targetQuality;
 
+      // Baidu/TeraBox HLS 및 네이버 MYBOX(단기 유효 서명 토큰/Range 문제 해결)는 LocalStreamProxy 경유
       final playUrl = ((isBaiduOrTeraBox && isHls) || isNaver || isMega)
-          ? LocalStreamProxy.instance.registerStream(widget.service, widget.item, quality: targetQuality)
+          ? LocalStreamProxy.instance.registerStream(
+              widget.service,
+              widget.item,
+              quality: effectiveQuality,
+              initialUrl: isMega ? null : rawStreamUrl,
+            )
           : rawStreamUrl;
       final headers = ((isBaiduOrTeraBox && isHls) || isNaver || isMega) ? <String, String>{} : rawHeaders;
 
-      // 1단계: 듀얼 플레이어 프리버퍼링 시도
+      // 1단계: 백그라운드 보조 플레이어(Standby Player)에서 프리버퍼링 및 목표 위치 동기화 후 핫스왑 시도
+      // 전환 실패 시 현재 재생 중인 _player를 절대 파괴하거나 00:00으로 리셋하지 않고 기존 스트림을 안전하게 유지!
       bool hotSwapSuccess = false;
       try {
         hotSwapSuccess = await _tryHotSwapQuality(
           playUrl: playUrl,
           headers: headers,
           targetQuality: effectiveQuality,
+          requestedQuality: targetQuality,
           token: token,
           isFallbackToOriginal: isFallbackToOriginal,
         );
       } catch (e) {
-        debugPrint('[PlayerScreen] 듀얼 플레이어 스왑 실패, 폴백 시도: $e');
+        debugPrint('[PlayerScreen] 듀얼 플레이어 스왑 예외: $e');
       }
 
-      // 2단계: 듀얼 플레이어 실패 시 프레임 프리즈 단일 플레이어 폴백
       if (!hotSwapSuccess && token == _switchQualityToken && mounted) {
-        await _fallbackSinglePlayerSwitch(
-          playUrl: playUrl,
-          headers: headers,
-          targetQuality: effectiveQuality,
-          token: token,
-          isFallbackToOriginal: isFallbackToOriginal,
+        // 실패한 스탠바이 프록시 세션 정리
+        if (playUrl.contains('127.0.0.1') && playUrl != _activeProxyStreamUrl) {
+          LocalStreamProxy.instance.unregisterStream(playUrl);
+        }
+        setState(() {
+          _isSwitchingQuality = false;
+        });
+        _showNotificationBanner(
+          message: isFallbackToOriginal
+              ? '선택한 화질(${targetQuality.label}) 및 원본 스트림 연결이 지연되어 현재 화질(${_currentQuality.label})을 유지합니다.'
+              : '선택한 화질(${targetQuality.label}) 스트림 응답이 지연되어 현재 화질(${_currentQuality.label})을 유지합니다.',
+          icon: Icons.warning_amber_rounded,
+          iconColor: Colors.orangeAccent,
+          duration: const Duration(seconds: 4),
         );
       }
     } catch (e) {
@@ -2377,9 +2392,12 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     required String playUrl,
     required Map<String, String> headers,
     required VideoQuality targetQuality,
+    required VideoQuality requestedQuality,
     required int token,
     required bool isFallbackToOriginal,
   }) async {
+    final prevHeight = _player.state.height;
+
     final standby = Player(
       configuration: const PlayerConfiguration(
         bufferSize: 64 * 1024 * 1024,
@@ -2402,9 +2420,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     await standby.setVolume(0.0);
     await standby.setRate(_playbackSpeed);
 
-    // 네트워크 버퍼링 소요 시간(1~2초)을 고려하여 충분한 선행 위치 지정
+    // 네트워크 버퍼링 소요 시간(1.5~2초)을 고려하여 선행 위치 지정
     final curPos = _player.state.position;
-    final leadMs = (2000 * _playbackSpeed).round();
+    final leadMs = (1800 * _playbackSpeed).round();
     final targetStart = curPos + Duration(milliseconds: leadMs);
 
     await standby.open(
@@ -2416,9 +2434,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       play: true,
     );
 
-    // 첫 비디오 프레임 디코딩 및 실제 렌더링 준비 대기 (최대 10초)
+    // 1. 첫 비디오 트랙 헤더/프레임 디코딩 대기 (최대 12초)
     final readyCompleter = Completer<bool>();
     StreamSubscription? posSub;
+    StreamSubscription? widthSub;
     Timer? timeoutTimer;
 
     void checkReady() {
@@ -2432,7 +2451,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
 
     posSub = standby.stream.position.listen((_) => checkReady());
-    timeoutTimer = Timer(const Duration(seconds: 10), () {
+    widthSub = standby.stream.width.listen((_) => checkReady());
+    timeoutTimer = Timer(const Duration(seconds: 12), () {
       if (!readyCompleter.isCompleted) {
         final hasWidth = standby.state.width != null && standby.state.width! > 0;
         final notBuffering = !standby.state.buffering;
@@ -2441,7 +2461,8 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     });
 
     final isReady = await readyCompleter.future;
-    posSub.cancel();
+    await posSub.cancel();
+    await widthSub.cancel();
     timeoutTimer.cancel();
 
     if (!isReady || token != _switchQualityToken || !mounted) {
@@ -2460,29 +2481,34 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
 
     // =========================================================================
-    // [프레임 싱크: 선행 파킹 후 랑데부 (Park & Rendezvous)]
-    // 움직이는 대상을 뒤쫓지 않고, standby를 미래 위치에 먼저 pause()로 파킹해 둔 뒤
-    // Primary 플레이어가 해당 프레임에 도달하는 찰나에 출발시킴
+    // [2. 목표 재생 위치 도달 검증 및 정밀 동기화 (00:00 리셋 원천 차단)]
+    // HLS(M3U8) 스트림에서 Media(start: targetStart)가 무시되어 00:00 근처에서
+    // 시작되었거나 livePos와 차이가 큰 경우, 실제로 targetSyncPos에 도달할 때까지
+    // standby.stream.position으로 엄격히 검증한 뒤 파킹!
     // =========================================================================
-    await standby.pause();
-    var parkedPos = standby.state.position;
     var livePos = _player.state.position;
+    var standbyPos = standby.state.position;
+    var diffMs = (standbyPos - livePos).inMilliseconds;
 
-    // standby가 livePos보다 뒤처졌거나 (오차 음수) 너무 먼 미래(>1200ms)인 경우
-    // 미래 시점(livePos + 600ms)으로 정밀 seek 후 다시 파킹
-    final diffMs = (parkedPos - livePos).inMilliseconds;
-    if (diffMs < 80 || diffMs > 1200) {
-      final targetSyncPos = livePos + Duration(milliseconds: (650 * _playbackSpeed).round());
+    if (diffMs < 80 || diffMs > 1500) {
+      final targetSyncPos = _player.state.position + Duration(milliseconds: (1200 * _playbackSpeed).round());
+      final minAcceptPos = targetSyncPos > const Duration(milliseconds: 1500)
+          ? targetSyncPos - const Duration(milliseconds: 1500)
+          : Duration.zero;
+
       try {
         await standby.seek(targetSyncPos);
-        // hr-seek 디코딩 완료 대기 (최대 2초)
-        await standby.stream.buffering.firstWhere((b) => !b).timeout(
-          const Duration(seconds: 2),
-          onTimeout: () => false,
-        );
-      } catch (_) {}
-      await standby.pause();
-      parkedPos = standby.state.position;
+        if (!standby.state.playing) {
+          await standby.play();
+        }
+        // buffering.firstWhere만 쓰면 seek 직전 false 상태가 즉시 반환되어 00:00에서 멈추는 버그가 발생하므로,
+        // 반드시 실제 position이 minAcceptPos 이상으로 도달하고 !buffering이 될 때까지 대기!
+        await standby.stream.position
+            .firstWhere((p) => p >= minAcceptPos && !standby.state.buffering)
+            .timeout(const Duration(seconds: 8));
+      } catch (e) {
+        debugPrint('[PlayerScreen] Standby seek 동기화 타임아웃/실패: $e');
+      }
     }
 
     if (token != _switchQualityToken || !mounted) {
@@ -2490,10 +2516,21 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       return false;
     }
 
+    // 파킹 전 최종 위치 검증: 만약 기존 재생 위치가 10초 이상인데 standby가 여전히 5초 이상 뒤처져 있다면(예: 00:00 고정)
+    // 잘못된 스왑으로 재생 위치가 처음으로 돌아가는 것을 막기 위해 스왑을 취소하고 기존 재생 유지!
+    await standby.pause();
+    final parkedPos = standby.state.position;
+    livePos = _player.state.position;
+    if (livePos > const Duration(seconds: 10) &&
+        (livePos - parkedPos).abs() > const Duration(seconds: 5)) {
+      debugPrint('[PlayerScreen] Standby 위치 동기화 실패 (live: $livePos, parked: $parkedPos) -> 스왑 취소 및 기존 화질 유지');
+      if (_standbyPlayer == standby) _disposeStandbyPlayer();
+      return false;
+    }
+
     // 랑데부(Rendezvous) 카운트다운:
     // standby는 parkedPos 프레임이 비디오 버퍼에 디코딩된 채 멈춰있고,
     // _player는 livePos에서 parkedPos를 향해 정상 재생 중임
-    // 30ms는 standby.play() 호출 후 하드웨어 오디오/비디오 출력 파이프라인 기상 지연 보정치
     const leadWakeup = Duration(milliseconds: 30);
     final targetHitPos = parkedPos > leadWakeup ? parkedPos - leadWakeup : parkedPos;
 
@@ -2504,7 +2541,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         break;
       }
       if (maxWaitWatch.elapsedMilliseconds > 2000) {
-        // 안전장치: 최대 2초 초과 시 루프 탈출
         break;
       }
       await Future.delayed(const Duration(milliseconds: 16));
@@ -2555,25 +2591,47 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
 
     _bindPlayerStreams(_player);
+    // 핫스왑 후 버퍼링 해제 시 자동 재생 보장 (일시정지 상태로 멈추는 현상 방지)
+    if (wasPlaying) {
+      _ensureAutoPlay();
+      if (!_player.state.playing) {
+        _player.play();
+      }
+    }
     // 자막 안전망 재검증
     _reapplySubtitleToPlayer(_player);
 
     if (mounted) {
-      setState(() {
-        _currentQuality = targetQuality;
-        _isSwitchingQuality = false;
-      });
-
       final actualW = _player.state.width;
       final actualH = _player.state.height;
       final resInfo = (actualW != null && actualH != null && actualW > 0 && actualH > 0)
           ? ' (${actualW}x$actualH)'
           : '';
 
+      // 서버가 고화질 요청(480p/720p/1080p)에 대해 여전히 360p(높이 <= 360 또는 이전과 동일한 저해상도)를 반환했는지 검증
+      final isServerDowngradedTo360 = !requestedQuality.isOriginal &&
+          requestedQuality != VideoQuality.q360p &&
+          actualH != null &&
+          actualH > 0 &&
+          actualH <= 368 &&
+          (prevHeight == null || actualH <= prevHeight);
+
+      setState(() {
+        _currentQuality = isServerDowngradedTo360 ? VideoQuality.q360p : targetQuality;
+        _isSwitchingQuality = false;
+      });
+
       if (isFallbackToOriginal) {
         _showNotificationBanner(
-          message: '선택한 화질(${targetQuality.label})을 지원하지 않아 원본$resInfo으로 재생됩니다.',
+          message: '선택한 화질(${requestedQuality.label})을 지원하지 않아 원본$resInfo으로 재생됩니다.',
           icon: Icons.warning_amber_rounded,
+          iconColor: Colors.orangeAccent,
+          duration: const Duration(seconds: 4),
+        );
+      } else if (isServerDowngradedTo360) {
+        _showNotificationBanner(
+          message: '클라우드 계정/서버 제한으로 ${requestedQuality.label} 변환이 거부되어 360p$resInfo로 재생됩니다.',
+          icon: Icons.info_outline,
           iconColor: Colors.orangeAccent,
           duration: const Duration(seconds: 4),
         );
@@ -2596,93 +2654,6 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     });
 
     return true;
-  }
-
-  /// 단일 플레이어 프레임 프리즈 폴백 (저사양/단일 디코더 기기 대응)
-  Future<void> _fallbackSinglePlayerSwitch({
-    required String playUrl,
-    required Map<String, String> headers,
-    required VideoQuality targetQuality,
-    required int token,
-    required bool isFallbackToOriginal,
-  }) async {
-    _disposeStandbyPlayer();
-
-    // 1. 검은 화면 방지용 스냅샷 캡처
-    try {
-      final shot = await _player.screenshot(format: 'image/jpeg');
-      if (shot != null && shot.isNotEmpty && mounted) {
-        setState(() {
-          _freezeFrameBytes = shot;
-        });
-      }
-    } catch (_) {}
-
-    final currentPos = _player.state.position;
-    final activeSub = _player.state.track.subtitle;
-    final externalSubFile = _activeExternalSubtitleFile;
-    final savedSubName = _currentSubtitleName;
-    final savedSubLang = _currentSubtitleLanguage;
-    final savedSubType = _currentSubtitleType;
-
-    final oldProxyUrl = _activeProxyStreamUrl;
-    if (playUrl.contains('127.0.0.1')) {
-      _activeProxyStreamUrl = playUrl;
-    } else {
-      _activeProxyStreamUrl = null;
-    }
-
-    await _player.open(
-      Media(
-        playUrl,
-        httpHeaders: headers.isNotEmpty ? headers : null,
-        start: currentPos,
-      ),
-      play: true,
-    );
-
-    _ensureAutoPlay();
-
-    // 새 스트림 첫 프레임 렌더링 감지 시 프리즈 오버레이 해제
-    StreamSubscription? frameSub;
-    frameSub = _player.stream.buffering.listen((buffering) {
-      if (!buffering && _player.state.playing && mounted) {
-        setState(() {
-          _freezeFrameBytes = null;
-          _isSwitchingQuality = false;
-          _currentQuality = targetQuality;
-        });
-        frameSub?.cancel();
-      }
-    });
-    Future.delayed(const Duration(seconds: 3), () {
-      if (mounted && _freezeFrameBytes != null) {
-        setState(() {
-          _freezeFrameBytes = null;
-          _isSwitchingQuality = false;
-          _currentQuality = targetQuality;
-        });
-      }
-      frameSub?.cancel();
-    });
-
-    if (savedSubType != 'none') {
-      if (externalSubFile != null && externalSubFile.existsSync()) {
-        final subTrack = SubtitleTrack.uri(
-          externalSubFile.path,
-          title: savedSubName,
-          language: savedSubLang ?? 'ko',
-        );
-        _pendingInitialSubtitleTrack = subTrack;
-      } else if (activeSub.id != 'no') {
-        _player.setSubtitleTrack(activeSub).catchError((_) {});
-      }
-      _reapplySubtitleToPlayer(_player);
-    }
-
-    if (oldProxyUrl != null && oldProxyUrl != _activeProxyStreamUrl) {
-      LocalStreamProxy.instance.unregisterStream(oldProxyUrl);
-    }
   }
 
   /// 화질 선택 다이얼로그 노출

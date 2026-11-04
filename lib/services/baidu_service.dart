@@ -483,18 +483,21 @@ class BaiduService extends CloudService {
     }
 
     // 5. 302 리다이렉트 최종 CDN URL 해석 (Pre-resolve)
+    // PCS locatedownload URL은 pcsUserAgent('LogStatistic')로 요청해야 서명 검증(403)을 통과함
     String finalStreamUrl = directUrl;
     try {
       final client = http.Client();
+      final isPcsUrl = directUrl.contains('pcs.baidu.com') || directUrl.contains('baidupcs.com');
       final request = http.Request('GET', Uri.parse(directUrl))
         ..followRedirects = false
         ..headers.addAll({
-          'User-Agent': defaultUserAgent,
+          'User-Agent': isPcsUrl ? pcsUserAgent : defaultUserAgent,
           'Cookie': cookieHeader,
           'Referer': 'https://pan.baidu.com/',
+          'Range': 'bytes=0-0',
         });
 
-      final response = await client.send(request);
+      final response = await client.send(request).timeout(const Duration(seconds: 7));
       if (response.isRedirect && response.headers['location'] != null) {
         finalStreamUrl = response.headers['location']!;
         debugPrint('[BaiduService] 302 리다이렉트 CDN URL 해석 성공');
