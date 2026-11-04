@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
 import '../models/media_item.dart';
@@ -23,15 +24,22 @@ class GoogleDriveService extends CloudService {
       ? account.customClientSecret!
       : (activeClientId == defaultClientId ? defaultClientSecret : null);
 
+  bool get _preferNativeSignIn =>
+      (!kIsWeb && (Platform.isAndroid || Platform.isIOS) && (account.customClientId == null || account.customClientId!.isEmpty)) ||
+      account.refreshToken == null ||
+      account.refreshToken!.isEmpty ||
+      account.refreshToken == 'google_sign_in';
+
   /// 네이티브 GoogleSignIn 또는 OAuth Refresh Token을 통해 토큰을 최신 상태로 유지
   @override
   Future<bool> refreshTokensIfNeeded() async {
-    // 1. 네이티브 GoogleSignIn 세션이 활성화되어 있거나 복구 가능한 경우 우선 사용
-    if (account.refreshToken == null || account.refreshToken!.isEmpty || account.refreshToken == 'google_sign_in') {
+    // 1. 모바일(Android/iOS) 또는 네이티브 GoogleSignIn 계정인 경우 GoogleAuthManager 최우선 사용
+    if (_preferNativeSignIn) {
       try {
         final token = await GoogleAuthManager().getAccessToken();
         if (token != null && token.isNotEmpty) {
           account.accessToken = token;
+          account.refreshToken = 'google_sign_in';
           account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
           await onAccountUpdated?.call(account);
           return true;
@@ -43,7 +51,7 @@ class GoogleDriveService extends CloudService {
 
     if (!account.isTokenExpired && account.accessToken.isNotEmpty) return true;
 
-    // 2. OAuth Refresh Token이 있는 경우 (루프백/웹뷰 인증 방식)
+    // 2. OAuth Refresh Token이 있는 경우 (PC 또는 커스텀 API 키 루프백 방식)
     if (account.refreshToken != null &&
         account.refreshToken!.isNotEmpty &&
         account.refreshToken != 'google_sign_in') {
@@ -77,17 +85,34 @@ class GoogleDriveService extends CloudService {
       } catch (_) {}
     }
 
-    // 3. 마지막 폴백으로 네이티브 GoogleSignIn 강제 갱신 시도
+    // 3. 마지막 폴백으로 네이티브 GoogleSignIn 강제 갱신(또는 대화형 복구) 시도
     try {
       final headers = await GoogleAuthManager().refreshAuthHeaders();
       final auth = headers['Authorization'];
       if (auth != null && auth.startsWith('Bearer ')) {
         account.accessToken = auth.substring(7).trim();
+        account.refreshToken = 'google_sign_in';
         account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
         await onAccountUpdated?.call(account);
         return true;
       }
-    } catch (_) {}
+    } catch (_) {
+      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+        try {
+          final signedIn = await GoogleAuthManager().signIn();
+          if (signedIn != null) {
+            final token = await GoogleAuthManager().getAccessToken();
+            if (token != null && token.isNotEmpty) {
+              account.accessToken = token;
+              account.refreshToken = 'google_sign_in';
+              account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
+              await onAccountUpdated?.call(account);
+              return true;
+            }
+          }
+        } catch (_) {}
+      }
+    }
 
     return account.accessToken.isNotEmpty;
   }
@@ -95,17 +120,34 @@ class GoogleDriveService extends CloudService {
   /// 401 발생 시 네이티브 캐시 파기 또는 OAuth 토큰 강제 재발급
   Future<bool> _forceRefreshOn401() async {
     account.tokenExpiry = DateTime.now().subtract(const Duration(minutes: 5));
-    if (account.refreshToken == null || account.refreshToken!.isEmpty || account.refreshToken == 'google_sign_in') {
+    if (_preferNativeSignIn) {
       try {
         final headers = await GoogleAuthManager().refreshAuthHeaders();
         final auth = headers['Authorization'];
         if (auth != null && auth.startsWith('Bearer ')) {
           account.accessToken = auth.substring(7).trim();
+          account.refreshToken = 'google_sign_in';
           account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
           await onAccountUpdated?.call(account);
           return true;
         }
-      } catch (_) {}
+      } catch (_) {
+        if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
+          try {
+            final signedIn = await GoogleAuthManager().signIn();
+            if (signedIn != null) {
+              final token = await GoogleAuthManager().getAccessToken();
+              if (token != null && token.isNotEmpty) {
+                account.accessToken = token;
+                account.refreshToken = 'google_sign_in';
+                account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
+                await onAccountUpdated?.call(account);
+                return true;
+              }
+            }
+          } catch (_) {}
+        }
+      }
     }
     return await refreshTokensIfNeeded();
   }

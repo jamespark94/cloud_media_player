@@ -71,7 +71,8 @@ class _AddAccountDialogState extends State<AddAccountDialog> with WidgetsBinding
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
-    if (state == AppLifecycleState.resumed && _isLoading) {
+    // 사용자가 명시적으로 수동 입력창을 보고 있을 때만 클립보드 검사 허용 (자동 가로채기 방지)
+    if (state == AppLifecycleState.resumed && _isLoading && _showManualInput) {
       _checkClipboardForAuthCode();
     }
   }
@@ -141,6 +142,61 @@ class _AddAccountDialogState extends State<AddAccountDialog> with WidgetsBinding
 
   Future<void> _startOAuth() async {
     if (_selectedType == null) return;
+
+    // 안드로이드/iOS에서 기본 Client ID로 Google Drive 연결 시 네이티브 로그인을 우선 수행
+    if (_selectedType == CloudType.googleDrive &&
+        (Platform.isAndroid || Platform.isIOS) &&
+        _clientIdController.text.trim().isEmpty) {
+      setState(() {
+        _isLoading = true;
+        _errorMessage = null;
+        _statusMessage = 'Google 계정 연결을 확인하고 있습니다...';
+      });
+      try {
+        final googleAccount = await GoogleAuthManager().signIn();
+        if (googleAccount == null) {
+          if (mounted) {
+            setState(() {
+              _isLoading = false;
+              _statusMessage = null;
+            });
+          }
+          return;
+        }
+        final token = await GoogleAuthManager().getAccessToken() ?? '';
+        final account = CloudAccount(
+          id: 'gdrive_${googleAccount.id}',
+          name: 'Google Drive (${googleAccount.displayName ?? googleAccount.email})',
+          type: CloudType.googleDrive,
+          email: googleAccount.email,
+          accessToken: token,
+          refreshToken: 'google_sign_in',
+          tokenExpiry: DateTime.now().add(const Duration(minutes: 55)),
+        );
+        if (mounted) {
+          await context.read<AccountManager>().saveAccount(account);
+          if (mounted) Navigator.pop(context, true);
+        }
+        return;
+      } catch (e) {
+        if (mounted) {
+          setState(() {
+            _isLoading = false;
+            _statusMessage = null;
+            _errorMessage = 'Google 네이티브 로그인 실패: $e';
+          });
+        }
+        return;
+      }
+    }
+
+    // 새 인증 시작 시 이전 클립보드의 만료된 code 파라미터 간섭 방지
+    try {
+      final clip = await Clipboard.getData(Clipboard.kTextPlain);
+      if (clip?.text != null && (clip!.text!.contains('code=') || clip.text!.contains('localhost:8999'))) {
+        await Clipboard.setData(const ClipboardData(text: ''));
+      }
+    } catch (_) {}
 
     _manualRevealTimer?.cancel();
     _manualRevealTimer = Timer(const Duration(seconds: 2), () {
@@ -1582,22 +1638,27 @@ class _AddAccountDialogState extends State<AddAccountDialog> with WidgetsBinding
                   },
                   onError: (err) {
                     final errStr = err.toString();
-                    if (errStr.contains('10') || errStr.contains('sign_in_failed') || errStr.contains('DEVELOPER_ERROR')) {
-                      _startOAuth();
+                    debugPrint('[AddAccountDialog] GoogleLoginButton error: $errStr');
+                    if (mounted) {
+                      setState(() {
+                        _errorMessage = 'Google 계정 연결 실패: $errStr';
+                      });
                     }
                   },
                 ),
               ),
-              const SizedBox(height: 10),
-              SizedBox(
-                width: double.infinity,
-                height: 44,
-                child: OutlinedButton.icon(
-                  onPressed: _startOAuth,
-                  icon: const Icon(Icons.open_in_browser, size: 18),
-                  label: const Text('인앱 브라우저로 로그인 및 연결'),
+              if (_clientIdController.text.trim().isNotEmpty) ...[
+                const SizedBox(height: 10),
+                SizedBox(
+                  width: double.infinity,
+                  height: 44,
+                  child: OutlinedButton.icon(
+                    onPressed: _startOAuth,
+                    icon: const Icon(Icons.open_in_browser, size: 18),
+                    label: const Text('커스텀 API 키로 브라우저 로그인'),
+                  ),
                 ),
-              ),
+              ],
             ] else ...[
               SizedBox(
                 width: double.infinity,

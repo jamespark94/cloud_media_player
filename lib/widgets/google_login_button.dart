@@ -58,8 +58,8 @@ class _GoogleLoginButtonState extends State<GoogleLoginButton> {
 
       String errorMessage = '로그인 중 오류가 발생했습니다.';
       final errStr = e.toString();
-      if (errStr.contains('10') || errStr.contains('sign_in_failed')) {
-        errorMessage = 'Google Play 서비스/SHA-1 등록 오류가 발생했습니다. (GCP 설정을 확인하세요)';
+      if (errStr.contains('10') || errStr.contains('sign_in_failed') || errStr.contains('DEVELOPER_ERROR')) {
+        errorMessage = 'Google Play 서비스 설정 오류(코드 10): GCP 콘솔에 패키지명과 SHA-1(05:4F:CA:22:84:A6:85:B3:46:56:91:7E:A3:C7:F3:9C:C2:A2:B2:AA)이 등록되어 있는지 확인하세요.';
       } else if (errStr.contains('권한이 거부')) {
         errorMessage = 'Google Drive 읽기 권한 동의가 필요합니다.';
       }
