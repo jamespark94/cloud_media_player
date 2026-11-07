@@ -31,16 +31,32 @@ void main() async {
   }
 
   // 1. 고화질 비디오 재생 엔진 (libmpv 기반 media_kit) 초기화
-  MediaKit.ensureInitialized();
+  try {
+    MediaKit.ensureInitialized();
+  } catch (e) {
+    debugPrint('[Main] MediaKit initialization failed: $e');
+  }
 
   // 2. 플랫폼 환경(에뮬레이터 여부 등) 감지 초기화
-  await PlatformUtils.initialize();
+  try {
+    await PlatformUtils.initialize();
+  } catch (e) {
+    debugPrint('[Main] PlatformUtils initialization failed: $e');
+  }
 
   // 3. Google Sign-In 이전 로그인 세션 비차단 무음 복구
-  unawaited(GoogleAuthManager().initialize());
+  try {
+    unawaited(GoogleAuthManager().initialize());
+  } catch (e) {
+    debugPrint('[Main] GoogleAuthManager initialization failed: $e');
+  }
 
   // 4. 대용량 동영상 구간 탐색(Seek) 및 토큰 중계 로컬 스트림 프록시 기동
-  await LocalStreamProxy.instance.start();
+  try {
+    await LocalStreamProxy.instance.start();
+  } catch (e) {
+    debugPrint('[Main] LocalStreamProxy initialization failed: $e');
+  }
 
   runApp(
     MultiProvider(
