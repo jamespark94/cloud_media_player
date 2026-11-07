@@ -1,8 +1,10 @@
 import 'package:flutter/foundation.dart';
 import 'dart:math';
 import 'dart:typed_data';
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../utils/mega_crypto_utils.dart';
 
 /// MEGA 세션 및 마스터 키 보안 저장 데이터 모델
@@ -155,38 +157,64 @@ class MegaAuthManager {
     return creds;
   }
 
-  /// `flutter_secure_storage`에 `sid`와 `masterKey`(Base64URL) 저장
+  /// 세션 및 마스터 키 저장 (Windows는 SharedPreferences, 모바일은 SecureStorage)
   static Future<void> saveCredentials(
     String accountId,
     MegaSessionCredentials credentials,
   ) async {
     try {
-      await _secureStorage.write(
-        key: '$_keyPrefix${accountId}_sid',
-        value: credentials.sid,
-      );
-      await _secureStorage.write(
-        key: '$_keyPrefix${accountId}_mk',
-        value: MegaCryptoUtils.base64UrlEncode(credentials.masterKey),
-      );
-      if (credentials.userHandle != null) {
-        await _secureStorage.write(
-          key: '$_keyPrefix${accountId}_uh',
-          value: credentials.userHandle!,
+      if (!kIsWeb && Platform.isWindows) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.setString('$_keyPrefix${accountId}_sid', credentials.sid);
+        await prefs.setString(
+          '$_keyPrefix${accountId}_mk',
+          MegaCryptoUtils.base64UrlEncode(credentials.masterKey),
         );
+        if (credentials.userHandle != null) {
+          await prefs.setString(
+            '$_keyPrefix${accountId}_uh',
+            credentials.userHandle!,
+          );
+        }
+      } else {
+        await _secureStorage.write(
+          key: '$_keyPrefix${accountId}_sid',
+          value: credentials.sid,
+        );
+        await _secureStorage.write(
+          key: '$_keyPrefix${accountId}_mk',
+          value: MegaCryptoUtils.base64UrlEncode(credentials.masterKey),
+        );
+        if (credentials.userHandle != null) {
+          await _secureStorage.write(
+            key: '$_keyPrefix${accountId}_uh',
+            value: credentials.userHandle!,
+          );
+        }
       }
     } catch (_) {}
   }
 
-  /// `flutter_secure_storage`에서 저장된 세션 및 마스터 키 복원
+  /// 저장된 세션 및 마스터 키 복원 (Windows는 SharedPreferences, 모바일은 SecureStorage)
   static Future<MegaSessionCredentials?> loadCredentials(
     String accountId, {
     String email = '',
   }) async {
     try {
-      final sid = await _secureStorage.read(key: '$_keyPrefix${accountId}_sid');
-      final mkB64 = await _secureStorage.read(key: '$_keyPrefix${accountId}_mk');
-      final uh = await _secureStorage.read(key: '$_keyPrefix${accountId}_uh');
+      String? sid;
+      String? mkB64;
+      String? uh;
+
+      if (!kIsWeb && Platform.isWindows) {
+        final prefs = await SharedPreferences.getInstance();
+        sid = prefs.getString('$_keyPrefix${accountId}_sid');
+        mkB64 = prefs.getString('$_keyPrefix${accountId}_mk');
+        uh = prefs.getString('$_keyPrefix${accountId}_uh');
+      } else {
+        sid = await _secureStorage.read(key: '$_keyPrefix${accountId}_sid');
+        mkB64 = await _secureStorage.read(key: '$_keyPrefix${accountId}_mk');
+        uh = await _secureStorage.read(key: '$_keyPrefix${accountId}_uh');
+      }
 
       if (sid != null && sid.isNotEmpty && mkB64 != null && mkB64.isNotEmpty) {
         final masterKey = MegaCryptoUtils.base64UrlDecode(mkB64);
@@ -201,12 +229,19 @@ class MegaAuthManager {
     return null;
   }
 
-  /// 계정 연결 해제 시 보안 저장소에서 키 삭제
+  /// 계정 연결 해제 시 키 삭제
   static Future<void> deleteCredentials(String accountId) async {
     try {
-      await _secureStorage.delete(key: '$_keyPrefix${accountId}_sid');
-      await _secureStorage.delete(key: '$_keyPrefix${accountId}_mk');
-      await _secureStorage.delete(key: '$_keyPrefix${accountId}_uh');
+      if (!kIsWeb && Platform.isWindows) {
+        final prefs = await SharedPreferences.getInstance();
+        await prefs.remove('$_keyPrefix${accountId}_sid');
+        await prefs.remove('$_keyPrefix${accountId}_mk');
+        await prefs.remove('$_keyPrefix${accountId}_uh');
+      } else {
+        await _secureStorage.delete(key: '$_keyPrefix${accountId}_sid');
+        await _secureStorage.delete(key: '$_keyPrefix${accountId}_mk');
+        await _secureStorage.delete(key: '$_keyPrefix${accountId}_uh');
+      }
     } catch (_) {}
   }
 }

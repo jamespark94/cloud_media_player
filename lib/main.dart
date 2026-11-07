@@ -15,6 +15,17 @@ import 'utils/platform_utils.dart';
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
+  // 디버깅용: debugPrint 출력을 파일(D:\My Documents\AI\cloud_media_player\app_debug.log)로도 저장
+  if (Platform.isWindows) {
+    final logSink = File(r'D:\My Documents\AI\cloud_media_player\app_debug.log')
+        .openWrite(mode: FileMode.append);
+    final origPrint = debugPrint;
+    debugPrint = (String? message, {int? wrapWidth}) {
+      origPrint(message, wrapWidth: wrapWidth);
+      logSink.writeln('${DateTime.now().toIso8601String()} $message');
+    };
+  }
+
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
   }

@@ -289,9 +289,9 @@ class TeraBoxService extends CloudService {
     ];
   }
 
-  /// 무료 계정 대역폭을 고려해 초기 재생 시 360p(빠른 로딩) 권장
+  /// 테라박스 초기 재생 권장 화질: 480p (기본 화질 개선)
   @override
-  VideoQuality getDefaultPlaybackQuality() => VideoQuality.q360p;
+  VideoQuality getDefaultPlaybackQuality() => VideoQuality.q480p;
 
   /// 다른 화질 스트림 URL을 백그라운드에서 사전 조회/캐싱합니다.
   @override

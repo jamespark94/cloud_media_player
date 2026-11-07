@@ -11,6 +11,7 @@ import 'package:media_kit/media_kit.dart';
 import 'package:media_kit_video/media_kit_video.dart';
 import 'package:window_manager/window_manager.dart';
 import 'package:provider/provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import '../../models/cloud_account.dart';
 import '../../models/media_item.dart';
 import '../../models/player_orientation_mode.dart';
@@ -55,6 +56,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   bool _showControls = true;
   Timer? _hideControlsTimer;
   double _playbackSpeed = 1.0;
+  int _seekSeconds = 10;
+  static const String _prefSeekSecondsKey = 'player_seek_seconds';
+  static const List<int> _seekSecondOptions = [5, 10, 15, 30, 60, 120, 300];
   Duration _totalDuration = Duration.zero;
   Duration? _dragPosition;
   bool _isFullScreen = !Platform.isWindows && !Platform.isLinux && !Platform.isMacOS;
@@ -309,7 +313,76 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _initVolume();
     SubtitleSettingsService.instance.init();
     _initOrientationMode();
+    _initSeekSeconds();
     _initAndPlay();
+  }
+
+  Future<void> _initSeekSeconds() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final saved = prefs.getInt(_prefSeekSecondsKey);
+      if (saved != null && _seekSecondOptions.contains(saved) && mounted) {
+        setState(() {
+          _seekSeconds = saved;
+        });
+      }
+    } catch (_) {}
+  }
+
+  Future<void> _setSeekSeconds(int seconds) async {
+    setState(() {
+      _seekSeconds = seconds;
+    });
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setInt(_prefSeekSecondsKey, seconds);
+    } catch (_) {}
+    _showNotificationBanner(
+      message: '점프 시간 설정: ${_formatSeekLabel(seconds)}',
+      icon: Icons.fast_forward_rounded,
+      iconColor: Colors.blueAccent,
+      duration: const Duration(seconds: 2),
+    );
+  }
+
+  String _formatSeekLabel(int seconds) {
+    if (seconds >= 60 && seconds % 60 == 0) {
+      return '${seconds ~/ 60}분 ($seconds초)';
+    }
+    return '$seconds초';
+  }
+
+  String _formatShortSeekLabel(int seconds) {
+    if (seconds >= 60 && seconds % 60 == 0) {
+      return '${seconds ~/ 60}m';
+    }
+    return '${seconds}s';
+  }
+
+  IconData _getReplayIcon(int seconds) {
+    switch (seconds) {
+      case 5:
+        return Icons.replay_5;
+      case 10:
+        return Icons.replay_10;
+      case 30:
+        return Icons.replay_30;
+      default:
+        return Icons.fast_rewind_rounded;
+    }
+  }
+
+  IconData _getForwardIcon(int seconds) {
+    switch (seconds) {
+      case 5:
+        return Icons.forward_5;
+      case 10:
+        return Icons.forward_10;
+      case 30:
+        return Icons.forward_30;
+      default:
+        return Icons.fast_forward_rounded;
+    }
   }
 
   Future<void> _initOrientationMode() async {
@@ -465,6 +538,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       _player.stream.log.listen((l) => debugPrint('[mpv] ${l.prefix}: ${l.text}'));
 
       debugPrint('[PlayerScreen] 스트림 오픈 시작 (isHls: $isHls, isFallback: $isFallbackToOriginal, quality: ${_currentQuality.label}): $playUrl');
+
+      // 초기 재생 비디오 해상도 모니터링 로그
+      _player.stream.videoParams.listen((params) {
+        if (params.w != null && params.h != null && params.h! > 0) {
+          debugPrint('[PlayerScreen][InitialResolution] width=${params.w}, height=${params.h}, quality=${_currentQuality.id}');
+        }
+      });
 
       // 4. Media에 start: resumePos를 전달하여 첫 프레임부터 이전 위치에서 디코딩 개시!
       await _player.open(
@@ -870,9 +950,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
   Future<void> _doubleTapSeek(int seconds) async {
     final current = _dragPosition ?? _player.state.position;
     await _safeSeek(current + Duration(seconds: seconds));
+    final absSec = seconds.abs();
     _showNotificationBanner(
-      message: seconds < 0 ? '${-seconds}초 뒤로' : '$seconds초 앞으로',
-      icon: seconds < 0 ? Icons.replay_10 : Icons.forward_10,
+      message: seconds < 0 ? '${_formatSeekLabel(absSec)} 뒤로' : '${_formatSeekLabel(absSec)} 앞으로',
+      icon: seconds < 0 ? _getReplayIcon(absSec) : _getForwardIcon(absSec),
       iconColor: Colors.white,
       duration: const Duration(milliseconds: 700),
     );
@@ -1879,11 +1960,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             _startHideTimer();
           },
           const SingleActivator(LogicalKeyboardKey.arrowRight): () {
-            final target = _player.state.position + const Duration(seconds: 10);
+            final target = _player.state.position + Duration(seconds: _seekSeconds);
             _safeSeek(target);
           },
           const SingleActivator(LogicalKeyboardKey.arrowLeft): () {
-            final target = _player.state.position - const Duration(seconds: 10);
+            final target = _player.state.position - Duration(seconds: _seekSeconds);
             _safeSeek(target < Duration.zero ? Duration.zero : target);
           },
         },
@@ -1926,9 +2007,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
                 final width = MediaQuery.of(context).size.width;
                 final x = _doubleTapDownX ?? width / 2;
                 if (x < width * 0.4) {
-                  _doubleTapSeek(-10);
+                  _doubleTapSeek(-_seekSeconds);
                 } else if (x > width * 0.6) {
-                  _doubleTapSeek(10);
+                  _doubleTapSeek(_seekSeconds);
                 } else {
                   _toggleFullScreen();
                 }
@@ -2325,6 +2406,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
       final isHls = rawStreamUrl.contains('.m3u8') ||
           rawStreamUrl.contains('api/streaming') ||
           rawStreamUrl.contains('method=streaming');
+      debugPrint('[PlayerScreen][QualityDebug] raw stream url (${targetQuality.id}): $rawStreamUrl isHls=$isHls');
       final isFallbackToOriginal = !targetQuality.isOriginal && !isHls;
       final effectiveQuality = isFallbackToOriginal ? VideoQuality.original : targetQuality;
 
@@ -2604,11 +2686,17 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     if (mounted) {
       final actualW = _player.state.width;
       final actualH = _player.state.height;
+      debugPrint('[PlayerScreen][QualityDebug] requested=${requestedQuality.id} target=${targetQuality.id} prevHeight=$prevHeight actual=${actualW}x$actualH url=$playUrl');
       final resInfo = (actualW != null && actualH != null && actualW > 0 && actualH > 0)
           ? ' (${actualW}x$actualH)'
           : '';
 
-      // 서버가 고화질 요청(480p/720p/1080p)에 대해 여전히 360p(높이 <= 360 또는 이전과 동일한 저해상도)를 반환했는지 검증
+      // 서버가 요청한 화질과 다른 해상도/동일 해상도를 반환했는지 검증
+      final isUnchangedResolution = prevHeight != null &&
+          actualH != null &&
+          actualH > 0 &&
+          actualH == prevHeight;
+
       final isServerDowngradedTo360 = !requestedQuality.isOriginal &&
           requestedQuality != VideoQuality.q360p &&
           actualH != null &&
@@ -2617,7 +2705,18 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           (prevHeight == null || actualH <= prevHeight);
 
       setState(() {
-        _currentQuality = isServerDowngradedTo360 ? VideoQuality.q360p : targetQuality;
+        if (isServerDowngradedTo360) {
+          _currentQuality = VideoQuality.q360p;
+        } else if (isUnchangedResolution) {
+          // 실제 해상도 변화가 전혀 없는 경우: 실제 높이에 맞춰 현상 유지
+          _currentQuality = (actualH != null && actualH <= 368)
+              ? VideoQuality.q360p
+              : (actualH != null && actualH <= 488)
+                  ? VideoQuality.q480p
+                  : targetQuality;
+        } else {
+          _currentQuality = targetQuality;
+        }
         _isSwitchingQuality = false;
       });
 
@@ -2633,6 +2732,13 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           message: '클라우드 계정/서버 제한으로 ${requestedQuality.label} 변환이 거부되어 360p$resInfo로 재생됩니다.',
           icon: Icons.info_outline,
           iconColor: Colors.orangeAccent,
+          duration: const Duration(seconds: 4),
+        );
+      } else if (isUnchangedResolution) {
+        _showNotificationBanner(
+          message: '서버에서 ${requestedQuality.label}을(를) 별도 제공하지 않아 이전과 동일한 해상도$resInfo로 유지됩니다.',
+          icon: Icons.info_outline,
+          iconColor: Colors.amberAccent,
           duration: const Duration(seconds: 4),
         );
       } else {
@@ -3106,17 +3212,67 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
             },
           ),
 
-          // 프로그레스 바 아래: 10초 뒤로 / 재생·일시정지 / 10초 앞으로 / 배속
+          // 프로그레스 바 아래: 점프 시간 설정 / 뒤로 점프 / 재생·일시정지 / 앞으로 점프 / 배속
           Row(
             mainAxisAlignment: MainAxisAlignment.center,
             children: [
-              const SizedBox(width: 48), // 배속 버튼과의 대칭을 위한 여백
+              // 점프 시간 설정 버튼 (좌측 대칭 배치)
+              PopupMenuButton<int>(
+                tooltip: '점프 시간 설정 (현재: ${_formatSeekLabel(_seekSeconds)})',
+                initialValue: _seekSeconds,
+                onSelected: (sec) {
+                  _setSeekSeconds(sec);
+                  _startHideTimer();
+                },
+                itemBuilder: (context) => [
+                  for (final sec in _seekSecondOptions)
+                    PopupMenuItem(
+                      value: sec,
+                      child: Row(
+                        children: [
+                          Icon(
+                            sec == _seekSeconds ? Icons.radio_button_checked : Icons.radio_button_off,
+                            size: 18,
+                            color: sec == _seekSeconds ? Colors.blueAccent : Colors.white54,
+                          ),
+                          const SizedBox(width: 8),
+                          Text(
+                            _formatSeekLabel(sec),
+                            style: TextStyle(
+                              fontWeight: _seekSeconds == sec ? FontWeight.bold : FontWeight.normal,
+                              color: _seekSeconds == sec ? Colors.blueAccent : null,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                ],
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.white38),
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      const Icon(Icons.swap_horiz_rounded, color: Colors.white70, size: 14),
+                      const SizedBox(width: 3),
+                      Text(
+                        _formatShortSeekLabel(_seekSeconds),
+                        style: const TextStyle(color: Colors.white, fontSize: 13),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 8),
               IconButton(
                 iconSize: 36,
-                icon: const Icon(Icons.replay_10, color: Colors.white),
-                tooltip: '10초 뒤로',
+                icon: Icon(_getReplayIcon(_seekSeconds), color: Colors.white),
+                tooltip: '${_formatSeekLabel(_seekSeconds)} 뒤로',
                 onPressed: () {
-                  final target = _player.state.position - const Duration(seconds: 10);
+                  final target = _player.state.position - Duration(seconds: _seekSeconds);
                   _safeSeek(target < Duration.zero ? Duration.zero : target);
                   _startHideTimer();
                 },
@@ -3126,10 +3282,10 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
               const SizedBox(width: 16),
               IconButton(
                 iconSize: 36,
-                icon: const Icon(Icons.forward_10, color: Colors.white),
-                tooltip: '10초 앞으로',
+                icon: Icon(_getForwardIcon(_seekSeconds), color: Colors.white),
+                tooltip: '${_formatSeekLabel(_seekSeconds)} 앞으로',
                 onPressed: () {
-                  final target = _player.state.position + const Duration(seconds: 10);
+                  final target = _player.state.position + Duration(seconds: _seekSeconds);
                   _safeSeek(target);
                   _startHideTimer();
                 },

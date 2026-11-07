@@ -160,6 +160,8 @@ class LocalStreamProxy {
         final bodyStr = utf8.decode(bodyBytes, allowMalformed: true);
 
         if (bodyStr.contains('#EXTM3U')) {
+          final previewLines = bodyStr.split('\n').take(12).join(' | ');
+          debugPrint('[LocalStreamProxy] M3U8 원본 헤더/내용 미리보기: $previewLines');
           final targetUri = Uri.parse(targetUrl);
           final rewritten = _rewriteM3u8(bodyStr, targetUri, sessionId);
 

@@ -336,10 +336,10 @@ class BaiduService extends CloudService {
   }
 
   /// 지원하는 화질 목록 (HLS 변환 화질 + 원본)
+  /// 바이두 공식 스트리밍 사양은 480p(기본 최저), 720p, 1080p, 원본입니다 (360p 미지원).
   @override
   Future<List<VideoQuality>> getAvailableQualities(MediaItem item) async {
     return const [
-      VideoQuality.q360p,
       VideoQuality.q480p,
       VideoQuality.q720p,
       VideoQuality.q1080p,
@@ -347,9 +347,9 @@ class BaiduService extends CloudService {
     ];
   }
 
-  /// 무료 계정 대역폭을 고려해 초기 재생 시 360p(빠른 로딩) 권장
+  /// 바이두 기본 재생 화질: 480p (바이두 최소 트랜스코딩 화질)
   @override
-  VideoQuality getDefaultPlaybackQuality() => VideoQuality.q360p;
+  VideoQuality getDefaultPlaybackQuality() => VideoQuality.q480p;
 
   /// 다른 화질 스트림 URL을 백그라운드에서 사전 조회/캐싱합니다.
   @override
@@ -584,19 +584,17 @@ class BaiduService extends CloudService {
   Future<String?> _fetchHlsStreamUrl(String filePath, String fsId, [VideoQuality? quality]) async {
     List<String> qualities;
     if (quality != null) {
-      if (quality == VideoQuality.q360p) {
-        qualities = ['M3U8_AUTO_360'];
-      } else if (quality == VideoQuality.q480p) {
+      if (quality == VideoQuality.q480p || quality == VideoQuality.q360p) {
         qualities = ['M3U8_AUTO_480'];
       } else if (quality == VideoQuality.q720p) {
         qualities = ['M3U8_AUTO_720'];
       } else if (quality == VideoQuality.q1080p) {
         qualities = ['M3U8_AUTO_1080'];
       } else {
-        qualities = ['M3U8_AUTO_360'];
+        qualities = ['M3U8_AUTO_480'];
       }
     } else {
-      qualities = ['M3U8_AUTO_360'];
+      qualities = ['M3U8_AUTO_480'];
     }
 
     // 1차 우선: PCS REST streaming API 시도 (BDUSS 전용 고속 엔드포인트 - errno -6 왕복 지연 13초 방지)
