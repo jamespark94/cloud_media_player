@@ -85,7 +85,7 @@ class GoogleDriveService extends CloudService {
       } catch (_) {}
     }
 
-    // 3. 마지막 폴백으로 네이티브 GoogleSignIn 강제 갱신(또는 대화형 복구) 시도
+    // 3. 마지막 폴백으로 네이티브 GoogleSignIn 강제 갱신 시도 (iOS에서 대화형 signIn() 자동 호출 차단)
     try {
       final headers = await GoogleAuthManager().refreshAuthHeaders();
       final auth = headers['Authorization'];
@@ -96,23 +96,7 @@ class GoogleDriveService extends CloudService {
         await onAccountUpdated?.call(account);
         return true;
       }
-    } catch (_) {
-      if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
-        try {
-          final signedIn = await GoogleAuthManager().signIn();
-          if (signedIn != null) {
-            final token = await GoogleAuthManager().getAccessToken();
-            if (token != null && token.isNotEmpty) {
-              account.accessToken = token;
-              account.refreshToken = 'google_sign_in';
-              account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
-              await onAccountUpdated?.call(account);
-              return true;
-            }
-          }
-        } catch (_) {}
-      }
-    }
+    } catch (_) {}
 
     return account.accessToken.isNotEmpty;
   }
@@ -131,23 +115,7 @@ class GoogleDriveService extends CloudService {
           await onAccountUpdated?.call(account);
           return true;
         }
-      } catch (_) {
-        if (!kIsWeb && (Platform.isAndroid || Platform.isIOS)) {
-          try {
-            final signedIn = await GoogleAuthManager().signIn();
-            if (signedIn != null) {
-              final token = await GoogleAuthManager().getAccessToken();
-              if (token != null && token.isNotEmpty) {
-                account.accessToken = token;
-                account.refreshToken = 'google_sign_in';
-                account.tokenExpiry = DateTime.now().add(const Duration(minutes: 50));
-                await onAccountUpdated?.call(account);
-                return true;
-              }
-            }
-          } catch (_) {}
-        }
-      }
+      } catch (_) {}
     }
     return await refreshTokensIfNeeded();
   }
