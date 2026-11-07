@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:google_sign_in/google_sign_in.dart';
 
@@ -39,6 +40,14 @@ class GoogleAuthManager {
   /// 앱 시작 시 이전 로그인 세션 무음 복구 (Non-blocking)
   Future<bool> initialize() async {
     if (_isInitialized && _currentUser != null) return true;
+
+    // iOS 환경에서는 GoogleService-Info.plist 및 GIDClientID/URLScheme 설정이 없을 경우
+    // signInSilently() 또는 GIDSignIn 네이티브 호출 시 NSInvalidArgumentException으로 앱이 크래시(SIGABRT)되므로 방어
+    if (Platform.isIOS) {
+      debugPrint('[GoogleAuthManager] iOS 환경에서는 시작 시 자동 signInSilently()를 생략합니다.');
+      _isInitialized = true;
+      return false;
+    }
 
     _googleSignIn.onCurrentUserChanged.listen((GoogleSignInAccount? account) {
       _currentUser = account;
