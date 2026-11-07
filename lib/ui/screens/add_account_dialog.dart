@@ -143,9 +143,9 @@ class _AddAccountDialogState extends State<AddAccountDialog> with WidgetsBinding
   Future<void> _startOAuth() async {
     if (_selectedType == null) return;
 
-    // 안드로이드/iOS에서 기본 Client ID로 Google Drive 연결 시 네이티브 로그인을 우선 수행
+    // 안드로이드에서 기본 Client ID로 Google Drive 연결 시 네이티브 로그인을 우선 수행 (iOS는 브라우저 OAuth 사용)
     if (_selectedType == CloudType.googleDrive &&
-        (Platform.isAndroid || Platform.isIOS) &&
+        Platform.isAndroid &&
         _clientIdController.text.trim().isEmpty) {
       setState(() {
         _isLoading = true;
