@@ -11,6 +11,7 @@ import 'services/local_stream_proxy.dart';
 import 'services/playback_history_service.dart';
 import 'ui/screens/home_screen.dart';
 import 'utils/platform_utils.dart';
+import 'utils/window_state_manager.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -28,6 +29,7 @@ void main() async {
 
   if (Platform.isWindows || Platform.isLinux || Platform.isMacOS) {
     await windowManager.ensureInitialized();
+    await WindowStateManager.instance.initialize();
   }
 
   // 1. 고화질 비디오 재생 엔진 (libmpv 기반 media_kit) 초기화

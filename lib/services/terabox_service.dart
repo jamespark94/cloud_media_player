@@ -335,7 +335,7 @@ class TeraBoxService extends CloudService {
 
     // 1. 비디오 파일이고 원본 요청이 아닐 경우, /api/streaming 비공식 API로 HLS(M3U8) 스트림 URL 우선 획득 시도
     if (!targetQuality.isOriginal && !item.isSubtitle && filePath.isNotEmpty && filePath != fsId) {
-      final hlsUrl = await _fetchHlsStreamUrl(filePath, fsId, targetQuality);
+      final hlsUrl = await _fetchHlsStreamUrl(filePath, fsId, targetQuality, item.duration);
       if (hlsUrl != null && hlsUrl.isNotEmpty) {
         debugPrint('[TeraBoxService] HLS (${targetQuality.id}) 스트림 URL 획득 성공: $hlsUrl');
         _streamUrlCache[cacheKey] = (
@@ -448,7 +448,7 @@ class TeraBoxService extends CloudService {
   }
 
   /// /api/streaming 비공식 API로부터 요청한 화질의 HLS 스트림 URL 획득
-  Future<String?> _fetchHlsStreamUrl(String filePath, String fsId, [VideoQuality? quality]) async {
+  Future<String?> _fetchHlsStreamUrl(String filePath, String fsId, [VideoQuality? quality, Duration? expectedDuration]) async {
     List<String> qualities;
     if (quality != null) {
       if (quality == VideoQuality.q360p) {
@@ -467,6 +467,8 @@ class TeraBoxService extends CloudService {
     }
 
     for (final q in qualities) {
+     for (int attempt = 1; attempt <= 3; attempt++) {
+      if (attempt > 1) await Future.delayed(const Duration(milliseconds: 800));
       final streamUri = Uri.parse('https://www.terabox.com/api/streaming').replace(
         queryParameters: {
           'app_id': appId,
@@ -494,6 +496,10 @@ class TeraBoxService extends CloudService {
           });
 
         final streamedRes = await client.send(req);
+        if (streamedRes.statusCode != 200 && !streamedRes.isRedirect) {
+          debugPrint('[TeraBoxService] HLS($q) 시도 $attempt/3 비정상 HTTP ${streamedRes.statusCode}');
+          continue;
+        }
 
         // 1. 302/301 리다이렉트된 Location 헤더가 HLS m3u8 주소인 경우
         if (streamedRes.isRedirect && streamedRes.headers['location'] != null) {
@@ -510,6 +516,16 @@ class TeraBoxService extends CloudService {
 
           // 직접 #EXTM3U 플레이리스트를 반환하는 경우에만 스트림 URI 자체를 재생 소스로 사용 (#EXTINF 세그먼트 검증)
           if (bodyText.contains('#EXTM3U') && bodyText.contains('#EXTINF')) {
+            // 변환 진행 중인 불완전 플레이리스트(ENDLIST 없음/길이 부족) 검증 → 재시도
+            double total = 0;
+            for (final m in RegExp(r'#EXTINF:([\d.]+)').allMatches(bodyText)) {
+              total += double.tryParse(m.group(1)!) ?? 0;
+            }
+            final hasEnd = bodyText.contains('#EXT-X-ENDLIST');
+            final expSec = expectedDuration?.inSeconds ?? 0;
+            final tooShort = expSec > 60 && total < expSec * 0.9;
+            debugPrint('[TeraBoxService] HLS($q) 시도 $attempt/3 플레이리스트 총길이=${total.toStringAsFixed(1)}s, ENDLIST=$hasEnd, 기대길이=${expSec}s');
+            if ((!hasEnd || tooShort) && attempt < 3) continue;
             return streamUri.toString();
           }
 
@@ -519,7 +535,8 @@ class TeraBoxService extends CloudService {
             if (json is Map) {
               if (json['errno'] != null && json['errno'] != 0) {
                 debugPrint('[TeraBoxService] HLS 스트리밍 응답 errno: ${json['errno']} (type: $q)');
-                continue; // 다음 해상도 시도 또는 폴백
+                if (json['errno'] == 130) break; // 해당 화질 미지원 → 재시도 불필요
+                continue;
               }
               final directM3u8 = json['url'] ??
                   json['m3u8'] ??
@@ -533,13 +550,14 @@ class TeraBoxService extends CloudService {
           } catch (_) {}
 
           // #EXTM3U가 아니고 유효한 URL도 없는 일반 HTML/에러 페이지인 경우 무시하고 다음 품질 시도
-          debugPrint('[TeraBoxService] HLS 응답에 #EXTM3U 세그먼트 또는 유효 URL 없음 (길이: ${bodyText.length})');
+          debugPrint('[TeraBoxService] HLS($q) 시도 $attempt/3 응답에 #EXTM3U 세그먼트 또는 유효 URL 없음 (길이: ${bodyText.length})');
         }
       } catch (e) {
-        debugPrint('[TeraBoxService] HLS 스트리밍 엔드포인트($q) 요청 실패: $e');
+        debugPrint('[TeraBoxService] HLS 스트리밍 엔드포인트($q) 시도 $attempt/3 요청 실패: $e');
       } finally {
         client.close();
       }
+     }
     }
     return null;
   }
