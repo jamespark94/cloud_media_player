@@ -61,9 +61,13 @@ class LocalDiskService extends CloudService {
       }
 
       bool isDir = false;
+      DateTime? folderModified;
       try {
         final stat = entity.statSync();
         isDir = stat.type == FileSystemEntityType.directory;
+        if (isDir) {
+          folderModified = stat.modified;
+        }
       } catch (_) {
         // stat 실패 시 FileSystemEntity 기본 타입으로 폴백
         isDir = entity is Directory;
@@ -76,6 +80,7 @@ class LocalDiskService extends CloudService {
             name: name,
             isFolder: true,
             parentId: folderId,
+            modifiedTime: folderModified,
           ),
         );
       } else {

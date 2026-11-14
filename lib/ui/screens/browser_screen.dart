@@ -1,5 +1,6 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
+import 'package:intl/intl.dart';
 import 'package:provider/provider.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:file_picker/file_picker.dart';
@@ -14,6 +15,7 @@ import '../../services/folder_shortcut_manager.dart';
 import '../../services/local_disk_service.dart';
 import '../../services/playback_history_service.dart';
 import '../../utils/permission_utils.dart';
+import '../../utils/sort_utils.dart';
 import 'player_screen.dart';
 
 enum BrowserViewMode {
@@ -80,7 +82,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
   String get _currentFolderPath => _folderStack.map((e) => e.value).join(' > ');
 
   static const String _prefViewModeKey = 'browser_explorer_view_mode';
+  static const String _prefSortFieldKey = 'browser_sort_field';
+  static const String _prefSortAscKey = 'browser_sort_ascending';
   BrowserViewMode _viewMode = BrowserViewMode.details;
+  SortField _sortField = SortField.name;
+  bool _sortAscending = true;
 
   @override
   void initState() {
@@ -97,14 +103,28 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Future<void> _loadViewMode() async {
     final prefs = await SharedPreferences.getInstance();
     final saved = prefs.getString(_prefViewModeKey);
-    if (saved != null) {
-      final mode = BrowserViewMode.values.firstWhere(
-        (m) => m.name == saved,
-        orElse: () => BrowserViewMode.details,
-      );
-      if (mounted) {
-        setState(() => _viewMode = mode);
-      }
+    final savedSortField = prefs.getString(_prefSortFieldKey);
+    final savedSortAsc = prefs.getBool(_prefSortAscKey);
+
+    if (mounted) {
+      setState(() {
+        if (saved != null) {
+          _viewMode = BrowserViewMode.values.firstWhere(
+            (m) => m.name == saved,
+            orElse: () => BrowserViewMode.details,
+          );
+        }
+        if (savedSortField != null) {
+          _sortField = SortField.values.firstWhere(
+            (f) => f.name == savedSortField,
+            orElse: () => SortField.name,
+          );
+        }
+        if (savedSortAsc != null) {
+          _sortAscending = savedSortAsc;
+        }
+        _applyFilter();
+      });
     }
   }
 
@@ -112,6 +132,22 @@ class _BrowserScreenState extends State<BrowserScreen> {
     setState(() => _viewMode = mode);
     final prefs = await SharedPreferences.getInstance();
     await prefs.setString(_prefViewModeKey, mode.name);
+  }
+
+  Future<void> _changeSort(SortField field, {required bool ascending}) async {
+    setState(() {
+      _sortField = field;
+      _sortAscending = ascending;
+      _applyFilter();
+    });
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_prefSortFieldKey, field.name);
+    await prefs.setBool(_prefSortAscKey, ascending);
+  }
+
+  void _onSelectSortField(SortField field) {
+    final nextAsc = field == _sortField ? !_sortAscending : field.defaultAscending;
+    _changeSort(field, ascending: nextAsc);
   }
 
   @override
@@ -161,12 +197,18 @@ class _BrowserScreenState extends State<BrowserScreen> {
   }
 
   void _applyFilter() {
+    final List<MediaItem> filtered;
     if (_searchQuery.trim().isEmpty) {
-      _filteredItems = List.from(_allItems);
+      filtered = List.from(_allItems);
     } else {
       final q = _searchQuery.toLowerCase();
-      _filteredItems = _allItems.where((item) => item.name.toLowerCase().contains(q)).toList();
+      filtered = _allItems.where((item) => item.name.toLowerCase().contains(q)).toList();
     }
+    _filteredItems = SortUtils.sortMediaItems(
+      filtered,
+      field: _sortField,
+      ascending: _sortAscending,
+    );
   }
 
   void _navigateToFolder(MediaItem folder) {
@@ -2022,6 +2064,8 @@ class _BrowserScreenState extends State<BrowserScreen> {
 
   // 4. 자세히 보기
   Widget _buildDetailsView(BuildContext context, double maxWidth) {
+    final showModifiedDate = maxWidth >= 640;
+
     return SingleChildScrollView(
       physics: const AlwaysScrollableScrollPhysics(),
       padding: EdgeInsets.fromLTRB(12, 12, 12, 24 + MediaQuery.of(context).padding.bottom),
@@ -2033,7 +2077,7 @@ class _BrowserScreenState extends State<BrowserScreen> {
         ),
         child: Column(
           children: [
-            // 테이블 헤더
+            // 테이블 헤더 (클릭하여 정렬 기준/방향 전환 가능)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
               decoration: const BoxDecoration(
@@ -2041,12 +2085,20 @@ class _BrowserScreenState extends State<BrowserScreen> {
                 borderRadius: BorderRadius.vertical(top: Radius.circular(10)),
               ),
               child: Row(
-                children: const [
-                  Expanded(flex: 6, child: Text('이름', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
-                  Expanded(flex: 2, child: Text('유형', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
-                  Expanded(flex: 2, child: Text('크기', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
-                  Expanded(flex: 3, child: Text('길이 / 시청 정보', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
-                  SizedBox(width: 76, child: Text('액션', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70))),
+                children: [
+                  Expanded(flex: 6, child: _buildSortableHeader('이름', SortField.name)),
+                  Expanded(flex: 2, child: _buildSortableHeader('유형', SortField.type)),
+                  Expanded(flex: 2, child: _buildSortableHeader('크기', SortField.size)),
+                  if (showModifiedDate)
+                    Expanded(flex: 3, child: _buildSortableHeader('변경날짜', SortField.modifiedDate)),
+                  const Expanded(
+                    flex: 3,
+                    child: Text('길이 / 시청 정보', style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70)),
+                  ),
+                  const SizedBox(
+                    width: 76,
+                    child: Text('액션', textAlign: TextAlign.center, style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.white70)),
+                  ),
                 ],
               ),
             ),
@@ -2054,9 +2106,9 @@ class _BrowserScreenState extends State<BrowserScreen> {
             // 테이블 행 목록
             ..._filteredItems.map((item) {
               if (item.isFolder) {
-                return _buildDetailsFolderRow(context, item);
+                return _buildDetailsFolderRow(context, item, showModifiedDate: showModifiedDate);
               } else {
-                return _buildDetailsFileRow(context, item);
+                return _buildDetailsFileRow(context, item, showModifiedDate: showModifiedDate);
               }
             }),
           ],
@@ -2065,7 +2117,45 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
-  Widget _buildDetailsFolderRow(BuildContext context, MediaItem item) {
+  Widget _buildSortableHeader(String title, SortField field) {
+    final isActive = _sortField == field;
+    return InkWell(
+      onTap: () => _onSelectSortField(field),
+      borderRadius: BorderRadius.circular(4),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 2),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Flexible(
+              child: Text(
+                title,
+                style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.bold,
+                  color: isActive ? Colors.blueAccent : Colors.white70,
+                ),
+                overflow: TextOverflow.ellipsis,
+              ),
+            ),
+            if (isActive) ...[
+              const SizedBox(width: 2),
+              Icon(
+                _sortAscending ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+                size: 13,
+                color: Colors.blueAccent,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildDetailsFolderRow(BuildContext context, MediaItem item, {bool showModifiedDate = false}) {
+    final modifiedStr = item.modifiedTime != null
+        ? DateFormat('yyyy-MM-dd HH:mm').format(item.modifiedTime!)
+        : '--';
     return Consumer<FolderShortcutManager>(
       builder: (context, shortcutMgr, _) {
         final isBookmarked = shortcutMgr.isFolderShortcut(widget.account.id, item.id);
@@ -2104,6 +2194,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   flex: 2,
                   child: Text('--', style: TextStyle(fontSize: 11, color: Colors.white38)),
                 ),
+                if (showModifiedDate)
+                  Expanded(
+                    flex: 3,
+                    child: Text(modifiedStr, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                  ),
                 Expanded(
                   flex: 3,
                   child: Text(
@@ -2146,8 +2241,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
     );
   }
 
-  Widget _buildDetailsFileRow(BuildContext context, MediaItem item) {
+  Widget _buildDetailsFileRow(BuildContext context, MediaItem item, {bool showModifiedDate = false}) {
     final isVid = item.isVideo;
+    final modifiedStr = item.modifiedTime != null
+        ? DateFormat('yyyy-MM-dd HH:mm').format(item.modifiedTime!)
+        : '--';
 
     return FutureBuilder<PlaybackRecord?>(
       future: isVid
@@ -2215,6 +2313,11 @@ class _BrowserScreenState extends State<BrowserScreen> {
                   child: Text(item.formattedSize.isNotEmpty ? item.formattedSize : '--',
                       style: const TextStyle(fontSize: 11, color: Colors.white60)),
                 ),
+                if (showModifiedDate)
+                  Expanded(
+                    flex: 3,
+                    child: Text(modifiedStr, style: const TextStyle(fontSize: 11, color: Colors.white54)),
+                  ),
                 Expanded(
                   flex: 3,
                   child: Row(
@@ -2394,47 +2497,180 @@ class _BrowserScreenState extends State<BrowserScreen> {
   Widget _buildSearchBar() {
     return Padding(
       padding: const EdgeInsets.fromLTRB(16, 4, 16, 6),
-      child: SizedBox(
-        height: 38,
-        child: TextField(
-          controller: _searchController,
-          style: const TextStyle(fontSize: 13),
-          decoration: InputDecoration(
-            hintText: '비디오 및 폴더 검색...',
-            hintStyle: const TextStyle(fontSize: 13, color: Colors.white38),
-            prefixIcon: const Icon(Icons.search, size: 18),
-            suffixIcon: _searchQuery.isNotEmpty
-                ? IconButton(
-                    icon: const Icon(Icons.clear, size: 18),
-                    onPressed: () {
-                      _searchController.clear();
-                      setState(() {
-                        _searchQuery = '';
-                        _applyFilter();
-                      });
-                    },
-                  )
-                : null,
-            filled: true,
-            fillColor: const Color(0xFF161A24),
-            contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
-            border: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Colors.white12),
-            ),
-            enabledBorder: OutlineInputBorder(
-              borderRadius: BorderRadius.circular(8),
-              borderSide: const BorderSide(color: Colors.white12),
+      child: Row(
+        children: [
+          Expanded(
+            child: SizedBox(
+              height: 38,
+              child: TextField(
+                controller: _searchController,
+                style: const TextStyle(fontSize: 13),
+                decoration: InputDecoration(
+                  hintText: '비디오 및 폴더 검색...',
+                  hintStyle: const TextStyle(fontSize: 13, color: Colors.white38),
+                  prefixIcon: const Icon(Icons.search, size: 18),
+                  suffixIcon: _searchQuery.isNotEmpty
+                      ? IconButton(
+                          icon: const Icon(Icons.clear, size: 18),
+                          onPressed: () {
+                            _searchController.clear();
+                            setState(() {
+                              _searchQuery = '';
+                              _applyFilter();
+                            });
+                          },
+                        )
+                      : null,
+                  filled: true,
+                  fillColor: const Color(0xFF161A24),
+                  contentPadding: const EdgeInsets.symmetric(vertical: 0, horizontal: 12),
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Colors.white12),
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(8),
+                    borderSide: const BorderSide(color: Colors.white12),
+                  ),
+                ),
+                onChanged: (val) {
+                  setState(() {
+                    _searchQuery = val;
+                    _applyFilter();
+                  });
+                },
+              ),
             ),
           ),
-          onChanged: (val) {
-            setState(() {
-              _searchQuery = val;
-              _applyFilter();
-            });
-          },
+          const SizedBox(width: 8),
+          _buildSortMenuButton(),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSortMenuButton() {
+    return PopupMenuButton<String>(
+      tooltip: '정렬 기준 (${_sortField.label} ${_sortAscending ? "오름차순" : "내림차순"})',
+      onSelected: (value) {
+        if (value == 'dir:asc') {
+          _changeSort(_sortField, ascending: true);
+        } else if (value == 'dir:desc') {
+          _changeSort(_sortField, ascending: false);
+        } else if (value.startsWith('field:')) {
+          final name = value.substring('field:'.length);
+          final field = SortField.values.firstWhere(
+            (f) => f.name == name,
+            orElse: () => SortField.name,
+          );
+          _onSelectSortField(field);
+        }
+      },
+      child: Container(
+        height: 38,
+        padding: const EdgeInsets.symmetric(horizontal: 10),
+        decoration: BoxDecoration(
+          color: const Color(0xFF161A24),
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: Colors.white12),
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Icon(Icons.sort_rounded, size: 17, color: Colors.blueAccent),
+            const SizedBox(width: 5),
+            Text(
+              _sortField.label,
+              style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: Colors.white),
+            ),
+            const SizedBox(width: 2),
+            Icon(
+              _sortAscending ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+              size: 14,
+              color: Colors.blueAccent,
+            ),
+          ],
         ),
       ),
+      itemBuilder: (context) => [
+        ...SortField.values.map((field) {
+          final isSelected = field == _sortField;
+          return PopupMenuItem<String>(
+            value: 'field:${field.name}',
+            child: Row(
+              children: [
+                Icon(
+                  field.icon,
+                  size: 18,
+                  color: isSelected ? Colors.blueAccent : Colors.white70,
+                ),
+                const SizedBox(width: 10),
+                Text(
+                  field.label,
+                  style: TextStyle(
+                    fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                    color: isSelected ? Colors.blueAccent : Colors.white,
+                  ),
+                ),
+                const Spacer(),
+                if (isSelected)
+                  Icon(
+                    _sortAscending ? Icons.arrow_upward_rounded : Icons.arrow_downward_rounded,
+                    size: 16,
+                    color: Colors.blueAccent,
+                  ),
+              ],
+            ),
+          );
+        }),
+        const PopupMenuDivider(),
+        PopupMenuItem<String>(
+          value: 'dir:asc',
+          child: Row(
+            children: [
+              Icon(
+                Icons.arrow_upward_rounded,
+                size: 18,
+                color: _sortAscending ? Colors.blueAccent : Colors.white70,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '오름차순',
+                style: TextStyle(
+                  fontWeight: _sortAscending ? FontWeight.bold : FontWeight.normal,
+                  color: _sortAscending ? Colors.blueAccent : Colors.white,
+                ),
+              ),
+              const Spacer(),
+              if (_sortAscending)
+                const Icon(Icons.check, size: 16, color: Colors.blueAccent),
+            ],
+          ),
+        ),
+        PopupMenuItem<String>(
+          value: 'dir:desc',
+          child: Row(
+            children: [
+              Icon(
+                Icons.arrow_downward_rounded,
+                size: 18,
+                color: !_sortAscending ? Colors.blueAccent : Colors.white70,
+              ),
+              const SizedBox(width: 10),
+              Text(
+                '내림차순',
+                style: TextStyle(
+                  fontWeight: !_sortAscending ? FontWeight.bold : FontWeight.normal,
+                  color: !_sortAscending ? Colors.blueAccent : Colors.white,
+                ),
+              ),
+              const Spacer(),
+              if (!_sortAscending)
+                const Icon(Icons.check, size: 16, color: Colors.blueAccent),
+            ],
+          ),
+        ),
+      ],
     );
   }
 
