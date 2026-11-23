@@ -24,7 +24,7 @@ typedef _GetModuleHandleADart = Pointer<Void> Function(Pointer<Uint8> name);
 class WhisperIsolateWorker {
   final WhisperController _controller = WhisperController();
   bool _isModelReady = false;
-  AiWhisperModelTier _currentTier = AiWhisperModelTier.tiny;
+  AiWhisperModelTier _currentTier = AiWhisperModelTier.base;
 
   /// 현재 OS에서 사용 중인 하드웨어 가속 설명 라벨.
   String get acceleratorLabel {
@@ -72,45 +72,85 @@ class WhisperIsolateWorker {
     }
   }
 
-  WhisperModel _toWhisperModel(AiWhisperModelTier tier) {
+  WhisperModel _toWrapperWhisperModel(AiWhisperModelTier tier) {
     switch (tier) {
       case AiWhisperModelTier.tiny:
         return WhisperModel.tiny;
       case AiWhisperModelTier.base:
         return WhisperModel.base;
+      case AiWhisperModelTier.small:
+        return WhisperModel.small;
+      case AiWhisperModelTier.largeV3TurboQ5:
+        return WhisperModel.large;
     }
   }
 
-  /// 토글 ON 시점에만 호출되어 경량 GGML 모델을 온디맨드 다운로드합니다.
+  /// 지정된 티어의 GGML 모델 로컬 저장 경로를 반환합니다.
+  static Future<String> getModelPath(AiWhisperModelTier tier) async {
+    final dir = await WhisperController.getModelDir();
+    return '$dir/${tier.modelFileName}';
+  }
+
+  /// 지정된 티어의 Whisper 모델이 이미 로컬에 다운로드되었는지 확인합니다.
+  static Future<bool> isModelDownloaded(AiWhisperModelTier tier) async {
+    try {
+      final path = await getModelPath(tier);
+      final file = File(path);
+      return file.existsSync() && file.lengthSync() > 1024 * 1024;
+    } catch (_) {
+      return false;
+    }
+  }
+
+  /// HuggingFace 공식 `ggerganov/whisper.cpp` 모델 다운로드 URL을 반환합니다.
+  static Uri getModelDownloadUri(AiWhisperModelTier tier) {
+    return Uri.parse(
+      'https://huggingface.co/ggerganov/whisper.cpp/resolve/main/${tier.modelFileName}',
+    );
+  }
+
+  /// 설정 화면 등에서 사용자가 선택한 모델을 사전 다운로드할 수 있는 정적 헬퍼.
+  static Future<String> ensureModelDownloaded({
+    required AiWhisperModelTier tier,
+    void Function(double progress, String status)? onProgress,
+  }) async {
+    final modelPath = await getModelPath(tier);
+    final modelFile = File(modelPath);
+    if (modelFile.existsSync() && modelFile.lengthSync() > 1024 * 1024) {
+      onProgress?.call(1.0, 'Whisper ${tier.shortName} 모델 준비 완료');
+      return modelPath;
+    }
+
+    onProgress?.call(0.0, 'Whisper ${tier.shortName} 모델 다운로드 중...');
+    await _downloadModelWithProgress(
+      uri: getModelDownloadUri(tier),
+      destinationPath: modelPath,
+      tierLabel: tier.shortName,
+      onProgress: onProgress,
+    );
+    return modelPath;
+  }
+
+  /// 토글 ON 시점에만 호출되어 선택된 GGML 모델을 온디맨드 다운로드합니다.
   Future<void> initialize({
     required AiWhisperModelTier tier,
     void Function(double progress, String status)? onProgress,
   }) async {
-    _currentTier = tier;
-    final model = _toWhisperModel(tier);
-    final modelPath = await _controller.getPath(model);
-    final modelFile = File(modelPath);
-
-    if (modelFile.existsSync() && modelFile.lengthSync() > 1024 * 1024) {
-      _isModelReady = true;
-      onProgress?.call(1.0, 'Whisper ${tier.code} 모델 준비 완료');
-      return;
+    if (_isModelReady && _currentTier != tier) {
+      await release();
     }
-
-    onProgress?.call(0.0, 'Whisper ${tier.code} 모델 다운로드 중...');
-    await _downloadModelWithProgress(
-      uri: model.modelUri,
-      destinationPath: modelPath,
-      tierCode: tier.code,
+    _currentTier = tier;
+    await ensureModelDownloaded(
+      tier: tier,
       onProgress: onProgress,
     );
     _isModelReady = true;
   }
 
-  Future<void> _downloadModelWithProgress({
+  static Future<void> _downloadModelWithProgress({
     required Uri uri,
     required String destinationPath,
-    required String tierCode,
+    required String tierLabel,
     void Function(double progress, String status)? onProgress,
   }) async {
     final dir = File(destinationPath).parent;
@@ -141,7 +181,7 @@ class WhisperIsolateWorker {
         if (totalBytes > 0) {
           final ratio = (receivedBytes / totalBytes).clamp(0.0, 1.0);
           final pct = (ratio * 100).round();
-          onProgress?.call(ratio, 'Whisper $tierCode 모델 다운로드 중 ($pct%)...');
+          onProgress?.call(ratio, 'Whisper $tierLabel 모델 다운로드 중 ($pct%)...');
         }
       }
       await sink.flush();
@@ -152,7 +192,7 @@ class WhisperIsolateWorker {
         await File(destinationPath).delete();
       }
       await tmpFile.rename(destinationPath);
-      onProgress?.call(1.0, 'Whisper $tierCode 모델 다운로드 완료');
+      onProgress?.call(1.0, 'Whisper $tierLabel 모델 다운로드 완료');
     } catch (e) {
       try {
         await sink?.close();
@@ -251,8 +291,8 @@ class WhisperIsolateWorker {
       throw StateError('Whisper 모델이 초기화되지 않았습니다.');
     }
 
-    final model = _toWhisperModel(_currentTier);
-    final modelPath = await _controller.getPath(model);
+    final model = _toWrapperWhisperModel(_currentTier);
+    final modelPath = await getModelPath(_currentTier);
 
     try {
       final WhisperTranscribeResponse response;

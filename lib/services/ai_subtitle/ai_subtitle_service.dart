@@ -5,6 +5,7 @@ import '../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../models/ai_subtitle/subtitle_segment.dart';
 import 'ai_subtitle_key_storage.dart';
 import 'engines/cloud_ai_subtitle_engine.dart';
+import 'engines/free_hybrid_subtitle_engine.dart';
 import 'engines/on_device_subtitle_engine.dart';
 import 'extractors/local_http_audio_relay.dart';
 import 'subtitle_generator_engine.dart';
@@ -21,13 +22,15 @@ class AiSubtitleService extends ChangeNotifier {
 
   AiSubtitleService._internal()
       : _injectedEngine = null,
+        _config = const AiSubtitleConfig(),
         _cache = SubtitleSegmentCache(
-          chunkSeconds: AiSubtitleConfig.defaultOnDeviceChunkSeconds,
+          chunkSeconds: AiSubtitleConfig.defaultFreeHybridChunkSeconds,
         ),
         _keyStorage = AiSubtitleKeyStorage.instance,
         translationSupportedOverride = null,
         seekDebounceDuration = const Duration(milliseconds: 1800),
         _cloudEngineFactory = null,
+        _freeHybridEngineFactory = null,
         _onDeviceEngineFactory = null;
 
   /// 단위 테스트용 격리 생성자.
@@ -36,20 +39,36 @@ class AiSubtitleService extends ChangeNotifier {
     SubtitleGeneratorEngine? engine,
     SubtitleSegmentCache? cache,
     AiSubtitleKeyStorage? keyStorage,
+    AiSubtitleConfig? initialConfig,
     this.translationSupportedOverride,
     this.seekDebounceDuration = const Duration(milliseconds: 1800),
     CloudAiSubtitleEngine Function(String? apiKey, String modelName)?
         cloudEngineFactory,
+    FreeHybridSubtitleEngine Function(AiWhisperModelTier tier)?
+        freeHybridEngineFactory,
     OnDeviceSubtitleEngine Function(AiWhisperModelTier tier)?
         onDeviceEngineFactory,
   })  : _engine = engine,
         _injectedEngine = engine,
+        _config = initialConfig ??
+            (engine != null
+                ? const AiSubtitleConfig(
+                    engineType: AiSubtitleEngineType.onDevice,
+                  )
+                : const AiSubtitleConfig()),
         _cache = cache ??
             SubtitleSegmentCache(
-              chunkSeconds: AiSubtitleConfig.defaultOnDeviceChunkSeconds,
+              chunkSeconds: (initialConfig ??
+                      (engine != null
+                          ? const AiSubtitleConfig(
+                              engineType: AiSubtitleEngineType.onDevice,
+                            )
+                          : const AiSubtitleConfig()))
+                  .effectiveChunkSeconds,
             ),
         _keyStorage = keyStorage ?? AiSubtitleKeyStorage.inMemory(),
         _cloudEngineFactory = cloudEngineFactory,
+        _freeHybridEngineFactory = freeHybridEngineFactory,
         _onDeviceEngineFactory = onDeviceEngineFactory;
 
   final SubtitleGeneratorEngine? _injectedEngine;
@@ -60,6 +79,8 @@ class AiSubtitleService extends ChangeNotifier {
   final Duration seekDebounceDuration;
   final CloudAiSubtitleEngine Function(String? apiKey, String modelName)?
       _cloudEngineFactory;
+  final FreeHybridSubtitleEngine Function(AiWhisperModelTier tier)?
+      _freeHybridEngineFactory;
   final OnDeviceSubtitleEngine Function(AiWhisperModelTier tier)?
       _onDeviceEngineFactory;
 
@@ -69,7 +90,7 @@ class AiSubtitleService extends ChangeNotifier {
   bool _isProcessingChunk = false;
   double? _initProgress;
   String? _statusMessage;
-  AiSubtitleConfig _config = const AiSubtitleConfig();
+  AiSubtitleConfig _config;
 
   // Read-only 플레이어 스트림 바인딩 컨텍스트
   Player? _boundPlayer;
@@ -85,6 +106,7 @@ class AiSubtitleService extends ChangeNotifier {
   bool _lastIsPlaying = true;
   int _lastBucketIndex = -1;
   int _consecutiveErrors = 0;
+  int _consecutiveTranslationErrors = 0;
   bool _hasNotifiedPlatformMode = false;
   bool _hasNotifiedTranslationError = false;
   bool _isSchedulerRunning = false;
@@ -113,7 +135,10 @@ class AiSubtitleService extends ChangeNotifier {
       AiSubtitleKeyStorage.maskApiKey(_keyStorage.cachedApiKey);
 
   bool get isTranslationSupported {
-    if (_config.engineType == AiSubtitleEngineType.cloudApi) return true;
+    if (_config.engineType == AiSubtitleEngineType.cloudApi ||
+        _config.engineType == AiSubtitleEngineType.freeHybrid) {
+      return true;
+    }
     return translationSupportedOverride ??
         SubtitleTranslator.create().isTranslationSupported;
   }
@@ -122,6 +147,10 @@ class AiSubtitleService extends ChangeNotifier {
     if (_engine != null) return _engine!.acceleratorLabel;
     if (_config.engineType == AiSubtitleEngineType.cloudApi) {
       return 'Gemini Multimodal API';
+    }
+    if (_config.engineType == AiSubtitleEngineType.freeHybrid) {
+      return FreeHybridSubtitleEngine(modelTier: _config.modelTier)
+          .acceleratorLabel;
     }
     return OnDeviceSubtitleEngine(modelTier: _config.modelTier).acceleratorLabel;
   }
@@ -167,6 +196,7 @@ class AiSubtitleService extends ChangeNotifier {
     _lastIsPlaying = player.state.playing;
     _lastBucketIndex = -1;
     _consecutiveErrors = 0;
+    _consecutiveTranslationErrors = 0;
     _hasNotifiedPlatformMode = false;
     _hasNotifiedTranslationError = false;
 
@@ -252,8 +282,8 @@ class AiSubtitleService extends ChangeNotifier {
     }
 
     _consecutiveErrors = 0;
+    _consecutiveTranslationErrors = 0;
     _hasNotifiedPlatformMode = false;
-    _hasNotifiedTranslationError = false;
     _hasNotifiedTranslationError = false;
     await _keyStorage.loadApiKey();
     notifyListeners();
@@ -283,6 +313,7 @@ class AiSubtitleService extends ChangeNotifier {
       _currentSegment = null;
       _lastBucketIndex = -1;
       _consecutiveErrors = 0;
+      _consecutiveTranslationErrors = 0;
       _hasNotifiedPlatformMode = false;
       _hasNotifiedTranslationError = false;
       await _cache.persistToDisk();
@@ -496,7 +527,7 @@ class AiSubtitleService extends ChangeNotifier {
         if (_config.engineType == AiSubtitleEngineType.onDevice &&
             !isTranslationSupported) {
           onNotification?.call(
-            'Windows 로컬 온디바이스 모드는 한국어 번역이 지원되지 않아 원어 자막으로 표시됩니다. (한국어 번역은 클라우드 AI 선택)',
+            'Windows 로컬 오프라인 모드는 한국어 번역이 지원되지 않아 원어 자막으로 표시됩니다. (한국어 번역은 온라인 무료 또는 클라우드 AI 선택)',
             isWarning: _config.displayMode == AiSubtitleDisplayMode.koreanOnly,
           );
         }
@@ -543,20 +574,27 @@ class AiSubtitleService extends ChangeNotifier {
 
   SubtitleGeneratorEngine _buildEngineForConfig(AiSubtitleConfig cfg) {
     if (_injectedEngine != null) return _injectedEngine;
-    if (cfg.engineType == AiSubtitleEngineType.cloudApi) {
-      final cachedKey = _keyStorage.cachedApiKey;
-      if (_cloudEngineFactory != null) {
-        return _cloudEngineFactory(cachedKey, cfg.cloudModelName);
-      }
-      return CloudAiSubtitleEngine(
-        apiKeyProvider: () => _keyStorage.loadApiKey(),
-        modelName: cfg.cloudModelName,
-      );
+    switch (cfg.engineType) {
+      case AiSubtitleEngineType.cloudApi:
+        final cachedKey = _keyStorage.cachedApiKey;
+        if (_cloudEngineFactory != null) {
+          return _cloudEngineFactory(cachedKey, cfg.cloudModelName);
+        }
+        return CloudAiSubtitleEngine(
+          apiKeyProvider: () => _keyStorage.loadApiKey(),
+          modelName: cfg.cloudModelName,
+        );
+      case AiSubtitleEngineType.freeHybrid:
+        if (_freeHybridEngineFactory != null) {
+          return _freeHybridEngineFactory(cfg.modelTier);
+        }
+        return FreeHybridSubtitleEngine(modelTier: cfg.modelTier);
+      case AiSubtitleEngineType.onDevice:
+        if (_onDeviceEngineFactory != null) {
+          return _onDeviceEngineFactory(cfg.modelTier);
+        }
+        return OnDeviceSubtitleEngine(modelTier: cfg.modelTier);
     }
-    if (_onDeviceEngineFactory != null) {
-      return _onDeviceEngineFactory(cfg.modelTier);
-    }
-    return OnDeviceSubtitleEngine(modelTier: cfg.modelTier);
   }
 
   Future<bool> _ensureEngineReady() async {
@@ -582,9 +620,14 @@ class AiSubtitleService extends ChangeNotifier {
     }
 
     if (!await _engine!.isSupported()) {
-      final msg = _config.engineType == AiSubtitleEngineType.cloudApi
-          ? '현재 환경에서 클라우드 AI 오디오 추출 모듈을 사용할 수 없습니다.'
-          : '현재 기기에서 온디바이스 AI 엔진을 지원하지 않습니다.';
+      final msg = switch (_config.engineType) {
+        AiSubtitleEngineType.cloudApi =>
+          '현재 환경에서 클라우드 AI 오디오 추출 모듈을 사용할 수 없습니다.',
+        AiSubtitleEngineType.freeHybrid =>
+          '현재 기기에서 온라인 무료 Whisper 자막 엔진을 지원하지 않습니다.',
+        AiSubtitleEngineType.onDevice =>
+          '현재 기기에서 로컬 오프라인 AI 엔진을 지원하지 않습니다.',
+      };
       _statusMessage = msg;
       onNotification?.call('$msg 동영상 재생은 정상 유지됩니다.', isWarning: true);
       await setEnabled(false);
@@ -592,9 +635,13 @@ class AiSubtitleService extends ChangeNotifier {
     }
 
     _isInitializing = true;
-    _statusMessage = _config.engineType == AiSubtitleEngineType.cloudApi
-        ? '클라우드 AI 자막 준비 중...'
-        : 'AI 자막 모델 준비 중...';
+    _statusMessage = switch (_config.engineType) {
+      AiSubtitleEngineType.cloudApi => '클라우드 AI 자막 준비 중...',
+      AiSubtitleEngineType.freeHybrid =>
+        '온라인 무료 Whisper (${_config.modelTier.shortName}) 준비 중...',
+      AiSubtitleEngineType.onDevice =>
+        '로컬 오프라인 Whisper (${_config.modelTier.shortName}) 준비 중...',
+    };
     notifyListeners();
 
     try {
@@ -667,11 +714,18 @@ class AiSubtitleService extends ChangeNotifier {
       targetLanguage: _config.targetLanguage,
     );
 
+    var yieldedCount = 0;
+    var translatedCount = 0;
+
     try {
       await for (final segment in engine.generateSubtitlesForChunk(req)) {
         if (!_isEnabled || epoch != _jobEpoch) {
           _cache.resetProcessingToUnprocessed(bucketIndex);
           return;
+        }
+        yieldedCount++;
+        if ((segment.translatedText ?? '').trim().isNotEmpty) {
+          translatedCount++;
         }
         _cache.insertSegment(bucketIndex, segment);
         _updateCurrentSegment(_boundPlayer?.state.position ?? _lastPosition);
@@ -682,7 +736,13 @@ class AiSubtitleService extends ChangeNotifier {
       }
       _cache.markCompleted(bucketIndex);
       _consecutiveErrors = 0;
-      if (!_hasNotifiedTranslationError &&
+      if (engine is FreeHybridSubtitleEngine) {
+        await _handleFreeHybridTranslationOutcome(
+          engine: engine,
+          yieldedCount: yieldedCount,
+          translatedCount: translatedCount,
+        );
+      } else if (!_hasNotifiedTranslationError &&
           engine is OnDeviceSubtitleEngine &&
           engine.isTranslationSupported &&
           engine.lastTranslationError != null) {
@@ -764,31 +824,15 @@ class AiSubtitleService extends ChangeNotifier {
               ? _onDeviceEngineFactory(_config.modelTier)
               : OnDeviceSubtitleEngine(modelTier: _config.modelTier);
           if (await onDeviceEngine.isSupported()) {
+            await onDeviceEngine.dispose();
             onNotification?.call(
               'Gemini API 할당량(Quota)을 초과하여 로컬 온디바이스 모드로 전환합니다.',
               isWarning: true,
             );
-            _jobEpoch++;
-            await _disposeActiveEngine();
-            final fallbackCfg = _config.copyWith(
-              engineType: AiSubtitleEngineType.onDevice,
-            );
-            _config = fallbackCfg;
-            _recreateCacheIfBucketSizeChanged();
-            if (_mediaItemId != null) {
-              await _cache.switchContext(
-                mediaItemId: _mediaItemId!,
-                sourceLanguage: _config.sourceLanguage,
-                engineKey: _config.engineType.code,
-              );
-            }
-            _consecutiveErrors = 0;
-            _hasNotifiedPlatformMode = true;
-            onConfigFallback?.call(fallbackCfg);
-            notifyListeners();
-            scheduleMicrotask(() => _scheduleWindowIfNeeded(_lastPosition));
+            await _switchEngineFallback(AiSubtitleEngineType.onDevice);
             return;
           }
+          await onDeviceEngine.dispose();
         }
         onNotification?.call(
           'Gemini API 할당량(Quota)을 초과하여 AI 자막을 안전하게 중지했습니다.',
@@ -810,6 +854,72 @@ class AiSubtitleService extends ChangeNotifier {
       case CloudAiErrorType.cancelled:
         return;
     }
+  }
+
+  Future<void> _handleFreeHybridTranslationOutcome({
+    required FreeHybridSubtitleEngine engine,
+    required int yieldedCount,
+    required int translatedCount,
+  }) async {
+    final err = engine.lastTranslationError;
+    if (err == null) {
+      if (yieldedCount > 0 && translatedCount > 0) {
+        _consecutiveTranslationErrors = 0;
+      }
+      return;
+    }
+
+    if (yieldedCount > 0 && translatedCount == 0) {
+      _consecutiveTranslationErrors++;
+      if (!_hasNotifiedTranslationError) {
+        _hasNotifiedTranslationError = true;
+        onNotification?.call(
+          '오프라인 상태이거나 무료 번역 요청에 실패해 원어 자막만 표시합니다. (재생은 정상 유지)',
+          isWarning: true,
+        );
+      }
+
+      final mobileMlKitSupported = translationSupportedOverride ??
+          SubtitleTranslator.create().isTranslationSupported;
+      if (_consecutiveTranslationErrors >= 2 &&
+          mobileMlKitSupported &&
+          _injectedEngine == null) {
+        final onDeviceEngine = _onDeviceEngineFactory != null
+            ? _onDeviceEngineFactory(_config.modelTier)
+            : OnDeviceSubtitleEngine(modelTier: _config.modelTier);
+        if (await onDeviceEngine.isSupported()) {
+          await onDeviceEngine.dispose();
+          onNotification?.call(
+            '오프라인 상태가 지속되어 로컬 오프라인 (ML Kit) 모드로 자동 전환합니다.',
+            isWarning: true,
+          );
+          await _switchEngineFallback(AiSubtitleEngineType.onDevice);
+          return;
+        }
+        await onDeviceEngine.dispose();
+      }
+    }
+  }
+
+  Future<void> _switchEngineFallback(AiSubtitleEngineType targetEngine) async {
+    _jobEpoch++;
+    await _disposeActiveEngine();
+    final fallbackCfg = _config.copyWith(engineType: targetEngine);
+    _config = fallbackCfg;
+    _recreateCacheIfBucketSizeChanged();
+    if (_mediaItemId != null) {
+      await _cache.switchContext(
+        mediaItemId: _mediaItemId!,
+        sourceLanguage: _config.sourceLanguage,
+        engineKey: _config.engineType.code,
+      );
+    }
+    _consecutiveErrors = 0;
+    _consecutiveTranslationErrors = 0;
+    _hasNotifiedPlatformMode = true;
+    onConfigFallback?.call(fallbackCfg);
+    notifyListeners();
+    scheduleMicrotask(() => _scheduleWindowIfNeeded(_lastPosition));
   }
 
   Future<void> _disposeActiveEngine() async {

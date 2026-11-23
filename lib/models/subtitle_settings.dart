@@ -49,7 +49,8 @@ class SubtitleSettings {
   final Color textColor;
   final Color backgroundColor;
   final double backgroundOpacity; // 0.0 (완전 투명) ~ 1.0 (완전 불투명)
-  final AiSubtitleEngineType aiEngineType; // AI 자막 엔진 (온디바이스 vs 클라우드)
+  final AiSubtitleEngineType aiEngineType; // AI 자막 엔진 (오프라인 / 온라인 무료 / 클라우드)
+  final AiWhisperModelTier aiWhisperModelTier; // 로컬 Whisper 모델 크기 (tiny / base / small / large-v3-turbo)
   final AiSubtitleDisplayMode aiDisplayMode; // AI 자막 표시 모드 (동시 / 한국어 / 원어)
   final String aiSourceLanguage; // AI 음성 인식 원본 언어 ('auto', 'en', 'es', 'ja', 'zh' 등)
 
@@ -60,7 +61,8 @@ class SubtitleSettings {
     this.textColor = Colors.white,
     this.backgroundColor = Colors.black,
     this.backgroundOpacity = 0.5,
-    this.aiEngineType = AiSubtitleEngineType.onDevice,
+    this.aiEngineType = AiSubtitleEngineType.freeHybrid,
+    this.aiWhisperModelTier = AiWhisperModelTier.base,
     this.aiDisplayMode = AiSubtitleDisplayMode.dual,
     this.aiSourceLanguage = 'auto',
   });
@@ -76,6 +78,7 @@ class SubtitleSettings {
     Color? backgroundColor,
     double? backgroundOpacity,
     AiSubtitleEngineType? aiEngineType,
+    AiWhisperModelTier? aiWhisperModelTier,
     AiSubtitleDisplayMode? aiDisplayMode,
     bool? showAiDualSubtitle,
     String? aiSourceLanguage,
@@ -95,6 +98,7 @@ class SubtitleSettings {
       backgroundColor: backgroundColor ?? this.backgroundColor,
       backgroundOpacity: backgroundOpacity ?? this.backgroundOpacity,
       aiEngineType: aiEngineType ?? this.aiEngineType,
+      aiWhisperModelTier: aiWhisperModelTier ?? this.aiWhisperModelTier,
       aiDisplayMode: nextDisplayMode,
       aiSourceLanguage: aiSourceLanguage ?? this.aiSourceLanguage,
     );
@@ -108,6 +112,7 @@ class SubtitleSettings {
   static const String _keyBgOpacity = 'subtitle_bg_opacity';
   static const String _keyAiDual = 'subtitle_ai_dual';
   static const String _keyAiEngineType = 'subtitle_ai_engine_type';
+  static const String _keyAiWhisperModelTier = 'subtitle_ai_whisper_model_tier';
   static const String _keyAiDisplayMode = 'subtitle_ai_display_mode';
   static const String _keyAiSourceLang = 'subtitle_ai_source_lang';
 
@@ -122,6 +127,8 @@ class SubtitleSettings {
     final bgOpacity = prefs.getDouble(_keyBgOpacity) ?? 0.5;
     final aiEngineType =
         AiSubtitleEngineType.fromCode(prefs.getString(_keyAiEngineType));
+    final aiWhisperModelTier =
+        AiWhisperModelTier.fromCode(prefs.getString(_keyAiWhisperModelTier));
     final storedDisplayMode = prefs.getString(_keyAiDisplayMode);
     final aiDisplayMode = storedDisplayMode != null
         ? AiSubtitleDisplayMode.fromCode(storedDisplayMode)
@@ -138,6 +145,7 @@ class SubtitleSettings {
       backgroundColor: Color(bgColorValue),
       backgroundOpacity: bgOpacity.clamp(0.0, 1.0),
       aiEngineType: aiEngineType,
+      aiWhisperModelTier: aiWhisperModelTier,
       aiDisplayMode: aiDisplayMode,
       aiSourceLanguage: aiSourceLang,
     );
@@ -152,6 +160,7 @@ class SubtitleSettings {
     await prefs.setInt(_keyBgColor, backgroundColor.toARGB32());
     await prefs.setDouble(_keyBgOpacity, backgroundOpacity);
     await prefs.setString(_keyAiEngineType, aiEngineType.code);
+    await prefs.setString(_keyAiWhisperModelTier, aiWhisperModelTier.code);
     await prefs.setString(_keyAiDisplayMode, aiDisplayMode.code);
     await prefs.setBool(_keyAiDual, showAiDualSubtitle);
     await prefs.setString(_keyAiSourceLang, aiSourceLanguage);

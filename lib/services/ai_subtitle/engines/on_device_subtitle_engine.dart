@@ -1,9 +1,8 @@
 import 'dart:async';
-import 'dart:io';
-import 'package:flutter/foundation.dart';
 import '../../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../../models/ai_subtitle/subtitle_segment.dart';
 import '../extractors/audio_chunk_extractor.dart';
+import '../stt/whisper_chunk_runner.dart';
 import '../stt/whisper_isolate_worker.dart';
 import '../subtitle_generator_engine.dart';
 import '../translators/mlkit_subtitle_translator.dart';
@@ -88,69 +87,45 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
     AudioChunkRequest request,
   ) async* {
     _isCancelled = false;
-    final tempDir = Directory('${Directory.systemTemp.path}/ai_sub_chunks');
-    if (!tempDir.existsSync()) {
-      tempDir.createSync(recursive: true);
+    final seq = ++_chunkSeq;
+
+    // 1. 오디오 청크 추출 + Whisper.cpp FFI 백그라운드 추론
+    final rawSegments = await extractAndTranscribeChunkWithWhisper(
+      extractor: _extractor,
+      whisperWorker: _whisperWorker,
+      request: request,
+      chunkSequence: seq,
+      isCancelled: () => _isCancelled,
+      tempFolderName: 'ai_sub_chunks',
+    );
+
+    if (_isCancelled || rawSegments.isEmpty) return;
+
+    // `auto` 모드에서 청크 내 일본어 가나가 감지되면 한자 단독 세그먼트("大丈夫" 등)도 일본어로 해석
+    if (request.sourceLanguage == 'auto') {
+      final hasKana = rawSegments.any(
+        (s) => MlKitSubtitleTranslator.containsJapaneseKana(s.originalText),
+      );
+      if (hasKana) {
+        _sessionPreferredCjkLang = 'ja';
+      }
     }
 
-    final seq = ++_chunkSeq;
-    final wavPath =
-        '${tempDir.path}/chunk_${request.chunkStart.inMilliseconds}_$seq.wav';
-    final wavFile = File(wavPath);
-
-    try {
-      // 1. 오디오 청크 추출 (16kHz, Mono, WAV)
-      await _extractor.extractChunk(
-        streamUrl: request.streamUrl,
-        httpHeaders: request.httpHeaders,
-        start: request.chunkStart,
-        duration: request.chunkDuration,
-        outputWavPath: wavPath,
-      );
-
+    // 2. 플랫폼별 로컬 번역 (Windows는 null 반환 -> 원어 자막 단독 유지)
+    for (final seg in rawSegments) {
       if (_isCancelled) return;
-
-      // 2. Whisper.cpp FFI 백그라운드 추론
-      final rawSegments = await _whisperWorker.transcribeChunk(
-        wavPath: wavPath,
-        chunkOffset: request.chunkStart,
-        chunkDuration: request.chunkDuration,
-        sourceLanguage: request.sourceLanguage,
-      );
-
-      // `auto` 모드에서 청크 내 일본어 가나가 감지되면 한자 단독 세그먼트("大丈夫" 등)도 일본어로 해석
-      if (request.sourceLanguage == 'auto') {
-        final hasKana = rawSegments.any(
-          (s) => MlKitSubtitleTranslator.containsJapaneseKana(s.originalText),
+      String? translated;
+      if (_translator.isTranslationSupported) {
+        final hint = _resolveTranslationHint(
+          requestSourceLanguage: request.sourceLanguage,
+          segment: seg,
         );
-        if (hasKana) {
-          _sessionPreferredCjkLang = 'ja';
-        }
+        translated = await _translator.translate(
+          seg.originalText,
+          detectedSourceLang: hint,
+        );
       }
-
-      // 3. 플랫폼별 로컬 번역 (Windows는 null 반환 -> 원어 자막 단독 유지)
-      for (final seg in rawSegments) {
-        if (_isCancelled) return;
-        String? translated;
-        if (_translator.isTranslationSupported) {
-          final hint = _resolveTranslationHint(
-            requestSourceLanguage: request.sourceLanguage,
-            segment: seg,
-          );
-          translated = await _translator.translate(
-            seg.originalText,
-            detectedSourceLang: hint,
-          );
-        }
-        yield seg.copyWith(translatedText: translated);
-      }
-    } finally {
-      // 임시 WAV 파일 즉시 정리 (디스크 누적 방지)
-      try {
-        if (wavFile.existsSync()) await wavFile.delete();
-      } catch (e) {
-        debugPrint('[OnDeviceSubtitleEngine] 임시 WAV 삭제 무시: $e');
-      }
+      yield seg.copyWith(translatedText: translated);
     }
   }
 

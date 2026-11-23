@@ -417,6 +417,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         SubtitleSettingsService.instance.updateSettings(
           cur.copyWith(
             aiEngineType: updatedConfig.engineType,
+            aiWhisperModelTier: updatedConfig.modelTier,
             aiDisplayMode: updatedConfig.displayMode,
             aiSourceLanguage: updatedConfig.sourceLanguage,
           ),
@@ -433,6 +434,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         httpHeaders: headers,
         initialConfig: AiSubtitleService.instance.config.copyWith(
           engineType: savedAiSettings.aiEngineType,
+          modelTier: savedAiSettings.aiWhisperModelTier,
           sourceLanguage: savedAiSettings.aiSourceLanguage,
           displayMode: savedAiSettings.aiDisplayMode,
         ),

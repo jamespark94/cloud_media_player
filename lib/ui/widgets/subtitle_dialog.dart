@@ -7,6 +7,8 @@ import '../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../models/media_item.dart';
 import '../../models/subtitle_settings.dart';
 import '../../services/ai_subtitle/ai_subtitle_service.dart';
+import '../../services/ai_subtitle/stt/whisper_isolate_worker.dart';
+import '../../services/ai_subtitle/translators/subtitle_translator.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/subtitle_settings_service.dart';
 import '../../utils/subtitle_utils.dart';
@@ -42,6 +44,10 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
   bool _isExportingSrt = false;
   String? _aiInlineFeedback;
   bool _aiInlineFeedbackIsWarning = false;
+  final Map<AiWhisperModelTier, bool> _downloadedWhisperModels = {};
+  bool _isDownloadingWhisperModel = false;
+  double _whisperDownloadProgress = 0.0;
+  String? _whisperDownloadStatus;
 
   // Foreground 추천 색상 목록
   final List<Color> _textColors = const [
@@ -70,7 +76,53 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
     );
     SubtitleSettingsService.instance.init();
     AiSubtitleService.instance.loadGeminiApiKey();
+    _refreshWhisperModelStates();
     _findCloudSubtitles();
+  }
+
+  Future<void> _refreshWhisperModelStates() async {
+    final results = <AiWhisperModelTier, bool>{};
+    for (final tier in AiWhisperModelTier.values) {
+      results[tier] = await WhisperIsolateWorker.isModelDownloaded(tier);
+    }
+    if (!mounted) return;
+    setState(() {
+      _downloadedWhisperModels
+        ..clear()
+        ..addAll(results);
+    });
+  }
+
+  Future<void> _downloadWhisperModel(AiWhisperModelTier tier) async {
+    if (_isDownloadingWhisperModel) return;
+    setState(() {
+      _isDownloadingWhisperModel = true;
+      _whisperDownloadProgress = 0.0;
+      _whisperDownloadStatus = 'Whisper ${tier.shortName} 모델 다운로드 준비 중...';
+    });
+    try {
+      await WhisperIsolateWorker.ensureModelDownloaded(
+        tier: tier,
+        onProgress: (progress, status) {
+          if (!mounted) return;
+          setState(() {
+            _whisperDownloadProgress = progress;
+            _whisperDownloadStatus = status;
+          });
+        },
+      );
+      await _refreshWhisperModelStates();
+      _setAiFeedback('Whisper ${tier.shortName} 모델 다운로드가 완료되었습니다.');
+    } catch (e) {
+      _setAiFeedback('Whisper 모델 다운로드 실패: $e', isWarning: true);
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isDownloadingWhisperModel = false;
+          _whisperDownloadStatus = null;
+        });
+      }
+    }
   }
 
   @override
@@ -438,14 +490,23 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
         final settings = SubtitleSettingsService.instance.settings;
         final isOn = ai.isEnabled;
         final selectedEngine = settings.aiEngineType;
+        final selectedTier = settings.aiWhisperModelTier;
         final isCloud = selectedEngine == AiSubtitleEngineType.cloudApi;
+        final isOnDevice = selectedEngine == AiSubtitleEngineType.onDevice;
+        final usesLocalWhisper = !isCloud;
+        final isLocalTranslatorSupported =
+            SubtitleTranslator.create().isTranslationSupported;
         final cachedCount = ai.cache.totalSegmentCount;
 
-        final engineSubtitle = isCloud
-            ? 'Gemini 멀티모달 고품질 전사 + 한국어 의역 (${ai.config.cloudModelName})'
-            : (ai.isTranslationSupported
-                ? '온디바이스 STT + 한국어 번역 (${ai.acceleratorLabel})'
-                : '온디바이스 원어 자막 STT (${ai.acceleratorLabel})');
+        final engineSubtitle = switch (selectedEngine) {
+          AiSubtitleEngineType.cloudApi =>
+            'Gemini 멀티모달 고품질 전사 + 한국어 의역 (${ai.config.cloudModelName})',
+          AiSubtitleEngineType.freeHybrid =>
+            '로컬 Whisper(${selectedTier.shortName}) + 무료 구글 번역 (무제한)',
+          AiSubtitleEngineType.onDevice => isLocalTranslatorSupported
+              ? '로컬 오프라인 Whisper(${selectedTier.shortName}) + ML Kit 번역'
+              : '로컬 오프라인 원어 자막 STT (${selectedTier.shortName})',
+        };
 
         return Container(
           margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -498,6 +559,7 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                     await ai.updateConfig(
                       ai.config.copyWith(
                         engineType: settings.aiEngineType,
+                        modelTier: settings.aiWhisperModelTier,
                         sourceLanguage: settings.aiSourceLanguage,
                         displayMode: settings.aiDisplayMode,
                       ),
@@ -553,54 +615,260 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
               ],
               const Divider(color: Colors.white12, height: 16),
 
-              // 1. 엔진 선택
+              // 1. 엔진 선택 (3가지)
               const Text(
                 'AI 자막 엔진 선택',
                 style: TextStyle(color: Colors.white70, fontSize: 11.5, fontWeight: FontWeight.w600),
               ),
               const SizedBox(height: 6),
-              Wrap(
-                spacing: 8,
-                runSpacing: 6,
+              Column(
                 children: [
                   for (final engineType in AiSubtitleEngineType.values)
-                    ChoiceChip(
-                      label: Text(
-                        engineType.label,
-                        style: TextStyle(
-                          fontSize: 11.5,
-                          color: selectedEngine == engineType
-                              ? Colors.black
-                              : Colors.white70,
-                          fontWeight: selectedEngine == engineType
-                              ? FontWeight.w600
-                              : FontWeight.normal,
+                    Padding(
+                      padding: const EdgeInsets.only(bottom: 6),
+                      child: InkWell(
+                        borderRadius: BorderRadius.circular(8),
+                        onTap: () async {
+                          if (selectedEngine == engineType) return;
+                          await SubtitleSettingsService.instance.updateSettings(
+                            settings.copyWith(aiEngineType: engineType),
+                          );
+                          await ai.updateConfig(
+                            ai.config.copyWith(engineType: engineType),
+                          );
+                        },
+                        child: Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 10,
+                            vertical: 8,
+                          ),
+                          decoration: BoxDecoration(
+                            color: selectedEngine == engineType
+                                ? Colors.cyanAccent.withValues(alpha: 0.14)
+                                : const Color(0xFF252C3B),
+                            borderRadius: BorderRadius.circular(8),
+                            border: Border.all(
+                              color: selectedEngine == engineType
+                                  ? Colors.cyanAccent
+                                  : Colors.white12,
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              Icon(
+                                selectedEngine == engineType
+                                    ? Icons.radio_button_checked
+                                    : Icons.radio_button_unchecked,
+                                size: 16,
+                                color: selectedEngine == engineType
+                                    ? Colors.cyanAccent
+                                    : Colors.white54,
+                              ),
+                              const SizedBox(width: 8),
+                              Expanded(
+                                child: Text(
+                                  engineType.label,
+                                  style: TextStyle(
+                                    fontSize: 11.5,
+                                    color: selectedEngine == engineType
+                                        ? Colors.white
+                                        : Colors.white70,
+                                    fontWeight: selectedEngine == engineType
+                                        ? FontWeight.w600
+                                        : FontWeight.normal,
+                                  ),
+                                ),
+                              ),
+                              if (engineType == AiSubtitleEngineType.freeHybrid)
+                                Container(
+                                  margin: const EdgeInsets.only(left: 6),
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 6,
+                                    vertical: 2,
+                                  ),
+                                  decoration: BoxDecoration(
+                                    color: Colors.tealAccent.withValues(alpha: 0.18),
+                                    borderRadius: BorderRadius.circular(4),
+                                    border: Border.all(
+                                      color: Colors.tealAccent.withValues(alpha: 0.6),
+                                    ),
+                                  ),
+                                  child: const Text(
+                                    '추천',
+                                    style: TextStyle(
+                                      fontSize: 9.5,
+                                      color: Colors.tealAccent,
+                                      fontWeight: FontWeight.bold,
+                                    ),
+                                  ),
+                                ),
+                            ],
+                          ),
                         ),
                       ),
-                      selected: selectedEngine == engineType,
-                      selectedColor: Colors.cyanAccent,
-                      backgroundColor: const Color(0xFF252C3B),
-                      side: BorderSide(
-                        color: selectedEngine == engineType
-                            ? Colors.cyanAccent
-                            : Colors.white12,
-                      ),
-                      visualDensity: VisualDensity.compact,
-                      onSelected: (selected) async {
-                        if (!selected || selectedEngine == engineType) return;
-                        await SubtitleSettingsService.instance.updateSettings(
-                          settings.copyWith(aiEngineType: engineType),
-                        );
-                        await ai.updateConfig(
-                          ai.config.copyWith(engineType: engineType),
-                        );
-                      },
                     ),
                 ],
               ),
 
-              // 2. Windows 로컬 온디바이스 번역 미지원 안내 또는 클라우드 AI API Key 설정 UI
-              if (!isCloud && !ai.isTranslationSupported) ...[
+              // 2. 로컬 Whisper 모델 크기 선택 & 다운로드 (온라인 무료 / 로컬 오프라인 공용)
+              if (usesLocalWhisper) ...[
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.22),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.memory, size: 14, color: Colors.cyanAccent),
+                          const SizedBox(width: 6),
+                          const Text(
+                            'Whisper 음성 인식 모델 크기',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: (_downloadedWhisperModels[selectedTier] == true
+                                      ? Colors.greenAccent
+                                      : Colors.amberAccent)
+                                  .withValues(alpha: 0.16),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              _downloadedWhisperModels[selectedTier] == true
+                                  ? '설치됨'
+                                  : '미설치 (${selectedTier.approxSize})',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: _downloadedWhisperModels[selectedTier] == true
+                                    ? Colors.greenAccent
+                                    : Colors.amberAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 6,
+                        runSpacing: 6,
+                        children: [
+                          for (final tier in AiWhisperModelTier.values)
+                            ChoiceChip(
+                              label: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Text(
+                                    tier.shortName,
+                                    style: TextStyle(
+                                      fontSize: 10.5,
+                                      color: selectedTier == tier
+                                          ? Colors.black
+                                          : Colors.white70,
+                                      fontWeight: selectedTier == tier
+                                          ? FontWeight.w600
+                                          : FontWeight.normal,
+                                    ),
+                                  ),
+                                  if (_downloadedWhisperModels[tier] == true) ...[
+                                    const SizedBox(width: 4),
+                                    Icon(
+                                      Icons.check_circle,
+                                      size: 12,
+                                      color: selectedTier == tier
+                                          ? Colors.black87
+                                          : Colors.greenAccent,
+                                    ),
+                                  ],
+                                ],
+                              ),
+                              selected: selectedTier == tier,
+                              selectedColor: Colors.cyanAccent,
+                              backgroundColor: const Color(0xFF252C3B),
+                              side: BorderSide(
+                                color: selectedTier == tier
+                                    ? Colors.cyanAccent
+                                    : Colors.white12,
+                              ),
+                              visualDensity: VisualDensity.compact,
+                              onSelected: _isDownloadingWhisperModel
+                                  ? null
+                                  : (selected) async {
+                                      if (!selected || selectedTier == tier) return;
+                                      await SubtitleSettingsService.instance.updateSettings(
+                                        settings.copyWith(aiWhisperModelTier: tier),
+                                      );
+                                      await ai.updateConfig(
+                                        ai.config.copyWith(modelTier: tier),
+                                      );
+                                    },
+                            ),
+                        ],
+                      ),
+                      if (_isDownloadingWhisperModel) ...[
+                        const SizedBox(height: 8),
+                        Text(
+                          _whisperDownloadStatus ?? '다운로드 중...',
+                          style: const TextStyle(color: Colors.cyanAccent, fontSize: 10.5),
+                        ),
+                        const SizedBox(height: 4),
+                        LinearProgressIndicator(
+                          value: _whisperDownloadProgress > 0
+                              ? _whisperDownloadProgress
+                              : null,
+                          color: Colors.cyanAccent,
+                          backgroundColor: Colors.white12,
+                          minHeight: 3,
+                        ),
+                      ] else if (_downloadedWhisperModels[selectedTier] != true) ...[
+                        const SizedBox(height: 8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                '${selectedTier.label} (자동 또는 사전 다운로드 가능)',
+                                style: const TextStyle(color: Colors.white54, fontSize: 10.5),
+                              ),
+                            ),
+                            const SizedBox(width: 8),
+                            OutlinedButton.icon(
+                              icon: const Icon(Icons.download, size: 14),
+                              label: const Text('모델 다운로드', style: TextStyle(fontSize: 11)),
+                              style: OutlinedButton.styleFrom(
+                                foregroundColor: Colors.cyanAccent,
+                                side: const BorderSide(color: Colors.cyanAccent),
+                                padding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 5,
+                                ),
+                                minimumSize: Size.zero,
+                                tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                              ),
+                              onPressed: () => _downloadWhisperModel(selectedTier),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ],
+
+              // 3. Windows 로컬 오프라인 번역 미지원 안내 또는 클라우드 AI API Key 설정 UI
+              if (isOnDevice && !isLocalTranslatorSupported) ...[
                 const SizedBox(height: 8),
                 Container(
                   width: double.infinity,
@@ -616,7 +884,7 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                       const SizedBox(width: 8),
                       const Expanded(
                         child: Text(
-                          'Windows 로컬 온디바이스 모드는 한국어 번역 없이 원어 자막만 생성됩니다. 한국어 번역 자막은 클라우드 AI를 선택하세요.',
+                          'Windows 로컬 오프라인 모드는 ML Kit 미지원으로 원어 자막만 생성됩니다. 무료 한국어 번역은 [온라인 무료]를 선택하세요.',
                           style: TextStyle(color: Colors.amberAccent, fontSize: 11),
                         ),
                       ),
@@ -630,13 +898,13 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                         ),
                         onPressed: () async {
                           await SubtitleSettingsService.instance.updateSettings(
-                            settings.copyWith(aiEngineType: AiSubtitleEngineType.cloudApi),
+                            settings.copyWith(aiEngineType: AiSubtitleEngineType.freeHybrid),
                           );
                           await ai.updateConfig(
-                            ai.config.copyWith(engineType: AiSubtitleEngineType.cloudApi),
+                            ai.config.copyWith(engineType: AiSubtitleEngineType.freeHybrid),
                           );
                         },
-                        child: const Text('클라우드 전환', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                        child: const Text('온라인 무료 전환', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
                       ),
                     ],
                   ),
@@ -810,11 +1078,11 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                           settings.copyWith(aiDisplayMode: mode),
                         );
                         ai.updateConfig(ai.config.copyWith(displayMode: mode));
-                        if (!isCloud &&
-                            !ai.isTranslationSupported &&
+                        if (isOnDevice &&
+                            !isLocalTranslatorSupported &&
                             mode != AiSubtitleDisplayMode.originalOnly) {
                           _setAiFeedback(
-                            'Windows 로컬 온디바이스는 원어 자막만 지원합니다. 한국어 번역을 원하시면 [클라우드 AI]를 선택해 주세요.',
+                            'Windows 로컬 오프라인은 원어 자막만 지원합니다. 한국어 번역을 원하시면 [온라인 무료] 또는 [클라우드 AI]를 선택해 주세요.',
                             isWarning: true,
                           );
                         }

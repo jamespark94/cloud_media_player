@@ -16,7 +16,8 @@ void main() {
       expect(settings.textColor, Colors.white);
       expect(settings.backgroundColor, Colors.black);
       expect(settings.backgroundOpacity, 0.5);
-      expect(settings.aiEngineType, AiSubtitleEngineType.onDevice);
+      expect(settings.aiEngineType, AiSubtitleEngineType.freeHybrid);
+      expect(settings.aiWhisperModelTier, AiWhisperModelTier.base);
       expect(settings.aiDisplayMode, AiSubtitleDisplayMode.dual);
       expect(settings.aiSourceLanguage, 'auto');
     });
@@ -43,6 +44,7 @@ void main() {
         backgroundColor: Color(0xFF212121),
         backgroundOpacity: 0.8,
         aiEngineType: AiSubtitleEngineType.cloudApi,
+        aiWhisperModelTier: AiWhisperModelTier.largeV3TurboQ5,
         aiDisplayMode: AiSubtitleDisplayMode.koreanOnly,
         aiSourceLanguage: 'es',
       );
@@ -57,6 +59,7 @@ void main() {
       expect(loaded.backgroundColor.toARGB32(), const Color(0xFF212121).toARGB32());
       expect(loaded.backgroundOpacity, 0.8);
       expect(loaded.aiEngineType, AiSubtitleEngineType.cloudApi);
+      expect(loaded.aiWhisperModelTier, AiWhisperModelTier.largeV3TurboQ5);
       expect(loaded.aiDisplayMode, AiSubtitleDisplayMode.koreanOnly);
       expect(loaded.aiSourceLanguage, 'es');
       expect(loaded.showAiDualSubtitle, isFalse);

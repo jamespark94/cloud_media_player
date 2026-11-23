@@ -8,12 +8,14 @@ import 'package:cloud_media_player/models/ai_subtitle/subtitle_segment.dart';
 import 'package:cloud_media_player/services/ai_subtitle/ai_subtitle_key_storage.dart';
 import 'package:cloud_media_player/services/ai_subtitle/ai_subtitle_service.dart';
 import 'package:cloud_media_player/services/ai_subtitle/engines/cloud_ai_subtitle_engine.dart';
+import 'package:cloud_media_player/services/ai_subtitle/engines/free_hybrid_subtitle_engine.dart';
 import 'package:cloud_media_player/services/ai_subtitle/engines/on_device_subtitle_engine.dart';
 import 'package:cloud_media_player/services/ai_subtitle/extractors/audio_chunk_extractor.dart';
 import 'package:cloud_media_player/services/ai_subtitle/extractors/ffmpeg_kit_chunk_runner.dart';
 import 'package:cloud_media_player/services/ai_subtitle/stt/whisper_isolate_worker.dart';
 import 'package:cloud_media_player/services/ai_subtitle/subtitle_generator_engine.dart';
 import 'package:cloud_media_player/services/ai_subtitle/subtitle_segment_cache.dart';
+import 'package:cloud_media_player/services/ai_subtitle/translators/google_web_batch_translator.dart';
 import 'package:cloud_media_player/services/ai_subtitle/translators/mlkit_subtitle_translator.dart';
 import 'package:cloud_media_player/services/ai_subtitle/translators/subtitle_translator.dart';
 import 'package:google_mlkit_translation/google_mlkit_translation.dart';
@@ -907,6 +909,458 @@ void main() {
         ),
         isTrue,
       );
+    });
+  });
+
+  group('FreeHybridSubtitleEngine & GoogleWebBatchTranslator Tests', () {
+    test('GoogleWebBatchTranslator sends 1 GET request per chunk with delimiter and maps segments', () async {
+      var httpCallCount = 0;
+      String? capturedClient;
+      String? capturedQuery;
+
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpAdapter((options) async {
+        httpCallCount++;
+        capturedClient = options.queryParameters['client'] as String?;
+        capturedQuery = options.queryParameters['q'] as String?;
+        expect(options.path, GoogleWebBatchTranslator.endpointUrl);
+
+        final body = jsonEncode([
+          [
+            ['안녕하세요.\n|||\n', 'Hello.\n|||\n', null, null, 1],
+            ['오늘 날씨가 좋네요.', 'The weather is nice today.', null, null, 1],
+          ],
+          null,
+          'en',
+        ]);
+        return ResponseBody.fromString(
+          body,
+          200,
+          headers: {
+            Headers.contentTypeHeader: [Headers.jsonContentType],
+          },
+        );
+      });
+
+      final translator = GoogleWebBatchTranslator(dio: dio);
+      final engine = FreeHybridSubtitleEngine(
+        modelTier: AiWhisperModelTier.small,
+        extractor: _FakeAudioExtractor(),
+        whisperWorker: _FakeWhisperWorker(const [
+          SubtitleSegment(
+            startTime: Duration(seconds: 1),
+            endTime: Duration(seconds: 3),
+            originalText: 'Hello.',
+          ),
+          SubtitleSegment(
+            startTime: Duration(seconds: 4),
+            endTime: Duration(seconds: 7),
+            originalText: 'The weather is nice today.',
+          ),
+        ]),
+        batchTranslator: translator,
+      );
+
+      await engine.initialize();
+      final segments = await engine
+          .generateSubtitlesForChunk(
+            const AudioChunkRequest(
+              mediaItemId: 'vid_hybrid_1',
+              streamUrl: 'https://example.com/movie.mp4',
+              httpHeaders: {},
+              chunkStart: Duration.zero,
+              chunkDuration: Duration(seconds: 45),
+              sourceLanguage: 'auto',
+              targetLanguage: 'ko',
+            ),
+          )
+          .toList();
+
+      expect(httpCallCount, 1);
+      expect(capturedClient, 'gtx');
+      expect(capturedQuery, 'Hello.\n|||\nThe weather is nice today.');
+      expect(engine.lastTranslationError, isNull);
+      expect(segments.length, 2);
+      expect(segments[0].originalText, 'Hello.');
+      expect(segments[0].translatedText, '안녕하세요.');
+      expect(segments[0].languageCode, 'en');
+      expect(segments[1].originalText, 'The weather is nice today.');
+      expect(segments[1].translatedText, '오늘 날씨가 좋네요.');
+      await engine.dispose();
+    });
+
+    test('FreeHybridSubtitleEngine falls back to original-only segments on offline translation failure', () async {
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpAdapter((options) async {
+        throw DioException.connectionError(
+          requestOptions: options,
+          reason: 'Offline',
+        );
+      });
+
+      final engine = FreeHybridSubtitleEngine(
+        modelTier: AiWhisperModelTier.largeV3TurboQ5,
+        extractor: _FakeAudioExtractor(),
+        whisperWorker: _FakeWhisperWorker(const [
+          SubtitleSegment(
+            startTime: Duration(seconds: 2),
+            endTime: Duration(seconds: 5),
+            originalText: 'Keep playing even offline.',
+          ),
+        ]),
+        batchTranslator: GoogleWebBatchTranslator(dio: dio),
+      );
+
+      await engine.initialize();
+      final segments = await engine
+          .generateSubtitlesForChunk(
+            const AudioChunkRequest(
+              mediaItemId: 'vid_hybrid_offline',
+              streamUrl: 'file:///local/movie.mp4',
+              httpHeaders: {},
+              chunkStart: Duration.zero,
+              chunkDuration: Duration(seconds: 45),
+            ),
+          )
+          .toList();
+
+      expect(segments.length, 1);
+      expect(segments.first.originalText, 'Keep playing even offline.');
+      expect(segments.first.translatedText, isNull);
+      expect(engine.lastTranslationError, isNotNull);
+      await engine.dispose();
+    });
+
+    test('AiSubtitleService keeps playback alive on Windows and falls back to onDevice on mobile when free translation stays offline', () async {
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpAdapter((options) async {
+        throw DioException.connectionError(
+          requestOptions: options,
+          reason: 'Offline',
+        );
+      });
+
+      // 1) Windows (ML Kit 미지원): freeHybrid 유지 + 원어 자막 표시 + 재생 중단 없음
+      final winService = AiSubtitleService.forTesting(
+        translationSupportedOverride: false,
+        initialConfig: const AiSubtitleConfig(
+          engineType: AiSubtitleEngineType.freeHybrid,
+          modelTier: AiWhisperModelTier.base,
+        ),
+        freeHybridEngineFactory: (tier) => FreeHybridSubtitleEngine(
+          modelTier: tier,
+          extractor: _FakeAudioExtractor(),
+          whisperWorker: _FakeWhisperWorker(const [
+            SubtitleSegment(
+              startTime: Duration(seconds: 1),
+              endTime: Duration(seconds: 4),
+              originalText: 'Offline original line',
+            ),
+          ]),
+          batchTranslator: GoogleWebBatchTranslator(dio: dio),
+        ),
+      );
+      winService.setStreamContextForTesting(
+        mediaItemId: 'vid_win_offline',
+        streamUrl: 'file:///local/movie.mp4',
+      );
+      final winNotices = <String>[];
+      winService.onNotification = (msg, {bool isWarning = false}) {
+        winNotices.add(msg);
+      };
+
+      await winService.setEnabled(true);
+      winService.processPositionUpdate(const Duration(seconds: 2), isPlaying: true);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      expect(winService.isEnabled, isTrue);
+      expect(winService.config.engineType, AiSubtitleEngineType.freeHybrid);
+      expect(winService.currentSegment?.originalText, 'Offline original line');
+      expect(winService.currentSegment?.translatedText, isNull);
+      expect(winNotices.any((n) => n.contains('원어 자막만 표시')), isTrue);
+      await winService.unbindStreamContext();
+
+      // 2) Mobile (ML Kit 지원): 연속 오프라인 번역 실패 시 onDevice 모드로 자동 폴백
+      final mobileService = AiSubtitleService.forTesting(
+        translationSupportedOverride: true,
+        initialConfig: const AiSubtitleConfig(
+          engineType: AiSubtitleEngineType.freeHybrid,
+          modelTier: AiWhisperModelTier.small,
+        ),
+        freeHybridEngineFactory: (tier) => FreeHybridSubtitleEngine(
+          modelTier: tier,
+          extractor: _FakeAudioExtractor(),
+          whisperWorker: _FakeWhisperWorker(const [
+            SubtitleSegment(
+              startTime: Duration(seconds: 1),
+              endTime: Duration(seconds: 4),
+              originalText: 'Offline line',
+            ),
+          ]),
+          batchTranslator: GoogleWebBatchTranslator(dio: dio),
+        ),
+        onDeviceEngineFactory: (tier) => _FakeOnDeviceEngine(supportedValue: true),
+      );
+      mobileService.setStreamContextForTesting(
+        mediaItemId: 'vid_mobile_offline',
+        streamUrl: 'file:///local/movie.mp4',
+      );
+      AiSubtitleConfig? fallbackCfg;
+      mobileService.onConfigFallback = (cfg) {
+        fallbackCfg = cfg;
+      };
+
+      await mobileService.setEnabled(true);
+      mobileService.processPositionUpdate(const Duration(seconds: 2), isPlaying: true);
+      await Future<void>.delayed(const Duration(milliseconds: 150));
+
+      expect(mobileService.isEnabled, isTrue);
+      expect(mobileService.config.engineType, AiSubtitleEngineType.onDevice);
+      expect(mobileService.config.modelTier, AiWhisperModelTier.small);
+      expect(fallbackCfg?.engineType, AiSubtitleEngineType.onDevice);
+      await mobileService.unbindStreamContext();
+    });
+
+    test('AiSubtitleConfig and WhisperModelTier defaults reflect online free recommended mode', () {
+      const cfg = AiSubtitleConfig();
+      expect(cfg.engineType, AiSubtitleEngineType.freeHybrid);
+      expect(cfg.modelTier, AiWhisperModelTier.base);
+      expect(cfg.effectiveChunkSeconds, 45);
+      expect(AiWhisperModelTier.fromCode('small'), AiWhisperModelTier.small);
+      expect(
+        AiWhisperModelTier.fromCode('large-v3-turbo'),
+        AiWhisperModelTier.largeV3TurboQ5,
+      );
+      expect(
+        AiWhisperModelTier.largeV3TurboQ5.modelFileName,
+        'ggml-large-v3-turbo-q5_0.bin',
+      );
+    });
+
+    test('mergeSegmentsIntoSentences merges fragmented segments by punctuation and 1.5s silence gap', () {
+      const raw = [
+        SubtitleSegment(
+          startTime: Duration(seconds: 0),
+          endTime: Duration(seconds: 2),
+          originalText: 'When I went',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 2, milliseconds: 200),
+          endTime: Duration(seconds: 4),
+          originalText: 'to the cafe,',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 4, milliseconds: 500),
+          endTime: Duration(seconds: 7),
+          originalText: 'I met an old friend.',
+        ),
+        // 1.5초 이상 침묵 간격으로 분리 (마침표가 없어도 분리)
+        SubtitleSegment(
+          startTime: Duration(seconds: 7, milliseconds: 500),
+          endTime: Duration(seconds: 9),
+          originalText: 'We talked',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 10, milliseconds: 500),
+          endTime: Duration(seconds: 12),
+          originalText: '本当に久しぶりですね！',
+        ),
+        // 일본어 물음표(？) 뒤 바로 이어지는 문장
+        SubtitleSegment(
+          startTime: Duration(seconds: 12, milliseconds: 300),
+          endTime: Duration(seconds: 14),
+          originalText: '元気ですか？',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 14, milliseconds: 100),
+          endTime: Duration(seconds: 16),
+          originalText: 'はい、元気です。',
+        ),
+      ];
+
+      final merged = FreeHybridSubtitleEngine.mergeSegmentsIntoSentences(raw);
+
+      expect(merged.length, 5);
+      expect(merged[0].mergedText, 'When I went to the cafe, I met an old friend.');
+      expect(merged[0].segmentIndices, [0, 1, 2]);
+      expect(merged[0].startIndex, 0);
+      expect(merged[0].endIndex, 2);
+
+      expect(merged[1].mergedText, 'We talked');
+      expect(merged[1].segmentIndices, [3]);
+
+      expect(merged[2].mergedText, '本当に久しぶりですね！');
+      expect(merged[2].segmentIndices, [4]);
+
+      expect(merged[3].mergedText, '元気ですか？');
+      expect(merged[3].segmentIndices, [5]);
+
+      expect(merged[4].mergedText, 'はい、元気です。');
+      expect(merged[4].segmentIndices, [6]);
+    });
+
+    test('distributeTranslatedSentence splits Korean translation proportionally at natural word boundaries', () {
+      const segments = [
+        SubtitleSegment(
+          startTime: Duration(seconds: 0),
+          endTime: Duration(seconds: 2),
+          originalText: 'When I went', // 11 chars
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 2),
+          endTime: Duration(seconds: 4),
+          originalText: 'to the cafe,', // 12 chars
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 4),
+          endTime: Duration(seconds: 7),
+          originalText: 'I met an old friend.', // 20 chars
+        ),
+      ];
+
+      const translated = '내가 어제 카페에 갔을 때, 거기서 오랜 친구를 만났어.';
+      final parts = FreeHybridSubtitleEngine.distributeTranslatedSentence(
+        translatedText: translated,
+        segments: segments,
+      );
+
+      expect(parts.length, 3);
+      expect(parts.every((p) => p != null && p.isNotEmpty), isTrue);
+      // 어절이 중간에 잘리지 않고 재결합 시 원 번역문과 동일
+      expect(parts.join(' '), translated);
+      // 쉼표 경계 자연 분할 및 세 번째 세그먼트가 가장 긴 원문에 맞게 가장 긴 번역 할당
+      expect(parts[2]!.length, greaterThan(parts[0]!.length));
+
+      // 단어 수보다 세그먼트 수가 많은 짧은 구문도 깨짐 없이 분할
+      const shortSegments = [
+        SubtitleSegment(
+          startTime: Duration(seconds: 0),
+          endTime: Duration(seconds: 1),
+          originalText: 'Thank',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 1),
+          endTime: Duration(seconds: 2),
+          originalText: 'you',
+        ),
+      ];
+      final shortParts = FreeHybridSubtitleEngine.distributeTranslatedSentence(
+        translatedText: '감사합니다',
+        segments: shortSegments,
+      );
+      expect(shortParts.length, 2);
+      expect(shortParts.join(''), '감사합니다');
+    });
+
+    test('FreeHybridSubtitleEngine merges fragments before 1 batch request and redistributes translations to timestamps', () async {
+      var httpCallCount = 0;
+      String? capturedQuery;
+
+      final dio = Dio();
+      dio.httpClientAdapter = _MockHttpAdapter((options) async {
+        httpCallCount++;
+        capturedQuery = options.queryParameters['q'] as String?;
+
+        final body = jsonEncode([
+          [
+            [
+              '내가 카페에 갔을 때, 오랜 친구를 만났어.\n|||\n',
+              'When I went to the cafe, I met an old friend.\n|||\n',
+              null,
+              null,
+              1,
+            ],
+            [
+              '정말 기뻤어.',
+              'I was really happy.',
+              null,
+              null,
+              1,
+            ],
+          ],
+          null,
+          'en',
+        ]);
+        return ResponseBody.fromString(
+          body,
+          200,
+          headers: {
+            Headers.contentTypeHeader: [Headers.jsonContentType],
+          },
+        );
+      });
+
+      const rawWhisperSegments = [
+        SubtitleSegment(
+          startTime: Duration(seconds: 1),
+          endTime: Duration(seconds: 3),
+          originalText: 'When I went',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 3, milliseconds: 100),
+          endTime: Duration(seconds: 5),
+          originalText: 'to the cafe,',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 5, milliseconds: 200),
+          endTime: Duration(seconds: 8),
+          originalText: 'I met an old friend.',
+        ),
+        SubtitleSegment(
+          startTime: Duration(seconds: 10), // 2.0초 간격 + 직전 문장 끝 부호
+          endTime: Duration(seconds: 12),
+          originalText: 'I was really happy.',
+        ),
+      ];
+
+      final engine = FreeHybridSubtitleEngine(
+        modelTier: AiWhisperModelTier.base,
+        extractor: _FakeAudioExtractor(),
+        whisperWorker: _FakeWhisperWorker(rawWhisperSegments),
+        batchTranslator: GoogleWebBatchTranslator(dio: dio),
+      );
+
+      await engine.initialize();
+      final result = await engine
+          .generateSubtitlesForChunk(
+            const AudioChunkRequest(
+              mediaItemId: 'vid_merge_1',
+              streamUrl: 'https://example.com/movie.mp4',
+              httpHeaders: {},
+              chunkStart: Duration.zero,
+              chunkDuration: Duration(seconds: 45),
+              sourceLanguage: 'auto',
+              targetLanguage: 'ko',
+            ),
+          )
+          .toList();
+
+      expect(httpCallCount, 1);
+      expect(
+        capturedQuery,
+        'When I went to the cafe, I met an old friend.\n|||\nI was really happy.',
+      );
+      expect(result.length, 4);
+
+      // 원본 타임스탬프와 원문은 그대로 유지
+      for (var i = 0; i < rawWhisperSegments.length; i++) {
+        expect(result[i].startTime, rawWhisperSegments[i].startTime);
+        expect(result[i].endTime, rawWhisperSegments[i].endTime);
+        expect(result[i].originalText, rawWhisperSegments[i].originalText);
+        expect(result[i].languageCode, 'en');
+        expect(result[i].translatedText, isNotNull);
+        expect(result[i].translatedText!.isNotEmpty, isTrue);
+      }
+
+      // 첫 번째 병합 문장(0~2번 세그먼트) 재조합 검증
+      final rejoinedFirst =
+          [result[0].translatedText, result[1].translatedText, result[2].translatedText]
+              .join(' ');
+      expect(rejoinedFirst, '내가 카페에 갔을 때, 오랜 친구를 만났어.');
+      // 두 번째 문장(3번 세그먼트) 단일 매핑 검증
+      expect(result[3].translatedText, '정말 기뻤어.');
+
+      await engine.dispose();
     });
   });
 }

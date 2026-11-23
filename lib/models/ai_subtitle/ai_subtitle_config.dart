@@ -1,7 +1,8 @@
 /// AI 자막 생성 엔진 종류 (Strategy 선택용).
 enum AiSubtitleEngineType {
-  onDevice('on_device', '로컬 온디바이스 (무료/오프라인)'),
-  cloudApi('cloud_api', '클라우드 AI (고품질/API Key 필요)');
+  onDevice('on_device', '로컬 오프라인 (완전 무료 / ML Kit)'),
+  freeHybrid('free_hybrid', '온라인 무료 (무제한 / 로컬 Whisper + 구글 번역)'),
+  cloudApi('cloud_api', '클라우드 AI (최고 품질 / Gemini 멀티모달 토큰 소모)');
 
   final String code;
   final String label;
@@ -12,7 +13,7 @@ enum AiSubtitleEngineType {
     for (final v in values) {
       if (v.code == code || v.name == code) return v;
     }
-    return AiSubtitleEngineType.onDevice;
+    return AiSubtitleEngineType.freeHybrid;
   }
 }
 
@@ -35,21 +36,41 @@ enum AiSubtitleDisplayMode {
   }
 }
 
-/// 온디바이스 Whisper 경량 모델 티어.
+/// 로컬 Whisper.cpp 모델 크기 티어.
 enum AiWhisperModelTier {
-  tiny('tiny', 'Tiny (~75MB, 가장 빠름)'),
-  base('base', 'Base (~142MB, 균형)');
+  tiny('tiny', 'Tiny (~75MB, 가장 빠름)', 'ggml-tiny.bin', 'Tiny (~75MB)', '~75MB'),
+  base('base', 'Base (~142MB, 균형 · 기본)', 'ggml-base.bin', 'Base (~142MB)', '~142MB'),
+  small('small', 'Small (~466MB, 높은 인식률)', 'ggml-small.bin', 'Small (~466MB)', '~466MB'),
+  largeV3TurboQ5(
+    'large-v3-turbo-q5_0',
+    'Large v3 Turbo Q5 (~547MB, 최고 인식률)',
+    'ggml-large-v3-turbo-q5_0.bin',
+    'Large v3 Turbo Q5',
+    '~547MB',
+  );
 
   final String code;
   final String label;
+  final String modelFileName;
+  final String shortName;
+  final String approxSize;
 
-  const AiWhisperModelTier(this.code, this.label);
+  const AiWhisperModelTier(
+    this.code,
+    this.label,
+    this.modelFileName,
+    this.shortName,
+    this.approxSize,
+  );
 
   static AiWhisperModelTier fromCode(String? code) {
     for (final v in values) {
-      if (v.code == code) return v;
+      if (v.code == code || v.name == code) return v;
     }
-    return AiWhisperModelTier.tiny;
+    if (code == 'large-v3-turbo') {
+      return AiWhisperModelTier.largeV3TurboQ5;
+    }
+    return AiWhisperModelTier.base;
   }
 }
 
@@ -82,6 +103,7 @@ class AiSourceLanguageOption {
 /// AI 실시간 자막 파이프라인 동작 설정.
 class AiSubtitleConfig {
   static const int defaultOnDeviceChunkSeconds = 20;
+  static const int defaultFreeHybridChunkSeconds = 45;
   static const int defaultCloudChunkSeconds = 45;
 
   final AiSubtitleEngineType engineType;
@@ -94,26 +116,65 @@ class AiSubtitleConfig {
   final String cloudModelName;
 
   const AiSubtitleConfig({
-    this.engineType = AiSubtitleEngineType.onDevice,
-    this.modelTier = AiWhisperModelTier.tiny,
+    this.engineType = AiSubtitleEngineType.freeHybrid,
+    this.modelTier = AiWhisperModelTier.base,
     this.sourceLanguage = 'auto',
     this.targetLanguage = 'ko',
-    this.chunkSeconds = defaultOnDeviceChunkSeconds,
-    this.lookaheadChunks = 2,
+    this.chunkSeconds = defaultFreeHybridChunkSeconds,
+    this.lookaheadChunks = 1,
     this.displayMode = AiSubtitleDisplayMode.dual,
     this.cloudModelName = 'gemini-3.8-flash',
   });
 
   bool get showDualSubtitle => displayMode == AiSubtitleDisplayMode.dual;
 
-  int get effectiveChunkSeconds => engineType == AiSubtitleEngineType.cloudApi
-      ? (chunkSeconds >= 30 && chunkSeconds <= 60
-          ? chunkSeconds
-          : defaultCloudChunkSeconds)
-      : chunkSeconds;
+  int get effectiveChunkSeconds {
+    switch (engineType) {
+      case AiSubtitleEngineType.cloudApi:
+        return chunkSeconds >= 30 && chunkSeconds <= 60
+            ? chunkSeconds
+            : defaultCloudChunkSeconds;
+      case AiSubtitleEngineType.freeHybrid:
+        return chunkSeconds >= 30 && chunkSeconds <= 60
+            ? chunkSeconds
+            : defaultFreeHybridChunkSeconds;
+      case AiSubtitleEngineType.onDevice:
+        return chunkSeconds > 0 && chunkSeconds <= 30
+            ? chunkSeconds
+            : defaultOnDeviceChunkSeconds;
+    }
+  }
 
-  int get effectiveLookaheadChunks =>
-      engineType == AiSubtitleEngineType.cloudApi ? 1 : lookaheadChunks;
+  int get effectiveLookaheadChunks {
+    switch (engineType) {
+      case AiSubtitleEngineType.cloudApi:
+      case AiSubtitleEngineType.freeHybrid:
+        return 1;
+      case AiSubtitleEngineType.onDevice:
+        return lookaheadChunks;
+    }
+  }
+
+  static int defaultChunkSecondsFor(AiSubtitleEngineType type) {
+    switch (type) {
+      case AiSubtitleEngineType.onDevice:
+        return defaultOnDeviceChunkSeconds;
+      case AiSubtitleEngineType.freeHybrid:
+        return defaultFreeHybridChunkSeconds;
+      case AiSubtitleEngineType.cloudApi:
+        return defaultCloudChunkSeconds;
+    }
+  }
+
+  static int defaultLookaheadFor(AiSubtitleEngineType type) {
+    switch (type) {
+      case AiSubtitleEngineType.onDevice:
+        return 2;
+      case AiSubtitleEngineType.freeHybrid:
+      case AiSubtitleEngineType.cloudApi:
+        return 1;
+    }
+  }
 
   AiSubtitleConfig copyWith({
     AiSubtitleEngineType? engineType,
@@ -141,13 +202,11 @@ class AiSubtitleConfig {
       targetLanguage: targetLanguage ?? this.targetLanguage,
       chunkSeconds: chunkSeconds ??
           (engineType != null && engineType != this.engineType
-              ? (nextEngine == AiSubtitleEngineType.cloudApi
-                  ? defaultCloudChunkSeconds
-                  : defaultOnDeviceChunkSeconds)
+              ? defaultChunkSecondsFor(nextEngine)
               : this.chunkSeconds),
       lookaheadChunks: lookaheadChunks ??
           (engineType != null && engineType != this.engineType
-              ? (nextEngine == AiSubtitleEngineType.cloudApi ? 1 : 2)
+              ? defaultLookaheadFor(nextEngine)
               : this.lookaheadChunks),
       displayMode: nextDisplayMode,
       cloudModelName: cloudModelName ?? this.cloudModelName,
