@@ -4,6 +4,7 @@
 
 list(APPEND FLUTTER_PLUGIN_LIST
   charset_converter
+  ffmpeg_kit_flutter_new_min
   flutter_secure_storage_windows
   flutter_volume_controller
   media_kit_libs_windows_video
@@ -17,6 +18,7 @@ list(APPEND FLUTTER_PLUGIN_LIST
 
 list(APPEND FLUTTER_FFI_PLUGIN_LIST
   jni
+  whisper_ggml
 )
 
 set(PLUGIN_BUNDLED_LIBRARIES)

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'ai_subtitle/ai_subtitle_config.dart';
 
 enum SubtitlePosition {
   bottom,
@@ -48,6 +49,9 @@ class SubtitleSettings {
   final Color textColor;
   final Color backgroundColor;
   final double backgroundOpacity; // 0.0 (완전 투명) ~ 1.0 (완전 불투명)
+  final AiSubtitleEngineType aiEngineType; // AI 자막 엔진 (온디바이스 vs 클라우드)
+  final AiSubtitleDisplayMode aiDisplayMode; // AI 자막 표시 모드 (동시 / 한국어 / 원어)
+  final String aiSourceLanguage; // AI 음성 인식 원본 언어 ('auto', 'en', 'es', 'ja', 'zh' 등)
 
   const SubtitleSettings({
     this.fontSize = 24.0,
@@ -56,7 +60,13 @@ class SubtitleSettings {
     this.textColor = Colors.white,
     this.backgroundColor = Colors.black,
     this.backgroundOpacity = 0.5,
+    this.aiEngineType = AiSubtitleEngineType.onDevice,
+    this.aiDisplayMode = AiSubtitleDisplayMode.dual,
+    this.aiSourceLanguage = 'auto',
   });
+
+  /// 하위 호환용 getter.
+  bool get showAiDualSubtitle => aiDisplayMode == AiSubtitleDisplayMode.dual;
 
   SubtitleSettings copyWith({
     double? fontSize,
@@ -65,7 +75,18 @@ class SubtitleSettings {
     Color? textColor,
     Color? backgroundColor,
     double? backgroundOpacity,
+    AiSubtitleEngineType? aiEngineType,
+    AiSubtitleDisplayMode? aiDisplayMode,
+    bool? showAiDualSubtitle,
+    String? aiSourceLanguage,
   }) {
+    final nextDisplayMode = aiDisplayMode ??
+        (showAiDualSubtitle == null
+            ? this.aiDisplayMode
+            : (showAiDualSubtitle
+                ? AiSubtitleDisplayMode.dual
+                : AiSubtitleDisplayMode.koreanOnly));
+
     return SubtitleSettings(
       fontSize: fontSize ?? this.fontSize,
       bottomOffset: bottomOffset ?? this.bottomOffset,
@@ -73,6 +94,9 @@ class SubtitleSettings {
       textColor: textColor ?? this.textColor,
       backgroundColor: backgroundColor ?? this.backgroundColor,
       backgroundOpacity: backgroundOpacity ?? this.backgroundOpacity,
+      aiEngineType: aiEngineType ?? this.aiEngineType,
+      aiDisplayMode: nextDisplayMode,
+      aiSourceLanguage: aiSourceLanguage ?? this.aiSourceLanguage,
     );
   }
 
@@ -82,6 +106,10 @@ class SubtitleSettings {
   static const String _keyTextColor = 'subtitle_text_color';
   static const String _keyBgColor = 'subtitle_bg_color';
   static const String _keyBgOpacity = 'subtitle_bg_opacity';
+  static const String _keyAiDual = 'subtitle_ai_dual';
+  static const String _keyAiEngineType = 'subtitle_ai_engine_type';
+  static const String _keyAiDisplayMode = 'subtitle_ai_display_mode';
+  static const String _keyAiSourceLang = 'subtitle_ai_source_lang';
 
   static Future<SubtitleSettings> load() async {
     final prefs = await SharedPreferences.getInstance();
@@ -92,6 +120,15 @@ class SubtitleSettings {
     final textColorValue = prefs.getInt(_keyTextColor) ?? Colors.white.toARGB32();
     final bgColorValue = prefs.getInt(_keyBgColor) ?? Colors.black.toARGB32();
     final bgOpacity = prefs.getDouble(_keyBgOpacity) ?? 0.5;
+    final aiEngineType =
+        AiSubtitleEngineType.fromCode(prefs.getString(_keyAiEngineType));
+    final storedDisplayMode = prefs.getString(_keyAiDisplayMode);
+    final aiDisplayMode = storedDisplayMode != null
+        ? AiSubtitleDisplayMode.fromCode(storedDisplayMode)
+        : ((prefs.getBool(_keyAiDual) ?? true)
+            ? AiSubtitleDisplayMode.dual
+            : AiSubtitleDisplayMode.koreanOnly);
+    final aiSourceLang = prefs.getString(_keyAiSourceLang) ?? 'auto';
 
     return SubtitleSettings(
       fontSize: fontSize.clamp(14.0, 48.0),
@@ -100,6 +137,9 @@ class SubtitleSettings {
       textColor: Color(textColorValue),
       backgroundColor: Color(bgColorValue),
       backgroundOpacity: bgOpacity.clamp(0.0, 1.0),
+      aiEngineType: aiEngineType,
+      aiDisplayMode: aiDisplayMode,
+      aiSourceLanguage: aiSourceLang,
     );
   }
 
@@ -111,5 +151,9 @@ class SubtitleSettings {
     await prefs.setInt(_keyTextColor, textColor.toARGB32());
     await prefs.setInt(_keyBgColor, backgroundColor.toARGB32());
     await prefs.setDouble(_keyBgOpacity, backgroundOpacity);
+    await prefs.setString(_keyAiEngineType, aiEngineType.code);
+    await prefs.setString(_keyAiDisplayMode, aiDisplayMode.code);
+    await prefs.setBool(_keyAiDual, showAiDualSubtitle);
+    await prefs.setString(_keyAiSourceLang, aiSourceLanguage);
   }
 }

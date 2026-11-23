@@ -177,6 +177,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.1.2"
+  ffmpeg_kit_flutter_new_min:
+    dependency: "direct main"
+    description:
+      name: ffmpeg_kit_flutter_new_min
+      sha256: ecdbd738b1fb2a5b994bef66fbe9a78169dad930e500b807958c1fb62babac21
+      url: "https://pub.dev"
+    source: hosted
+    version: "4.0.0"
+  ffmpeg_kit_flutter_platform_interface:
+    dependency: transitive
+    description:
+      name: ffmpeg_kit_flutter_platform_interface
+      sha256: addf046ae44e190ad0101b2fde2ad909a3cd08a2a109f6106d2f7048b7abedee
+      url: "https://pub.dev"
+    source: hosted
+    version: "0.2.1"
   file:
     dependency: transitive
     description:
@@ -320,6 +336,14 @@ packages:
     description: flutter
     source: sdk
     version: "0.0.0"
+  freezed_annotation:
+    dependency: transitive
+    description:
+      name: freezed_annotation
+      sha256: "7294967ff0a6d98638e7acb774aac3af2550777accd8149c90af5b014e6d44d8"
+      url: "https://pub.dev"
+    source: hosted
+    version: "3.1.0"
   google_identity_services_web:
     dependency: transitive
     description:
@@ -328,6 +352,22 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "0.3.3+1"
+  google_mlkit_commons:
+    dependency: transitive
+    description:
+      name: google_mlkit_commons
+      sha256: "58b969da65027b6242afb38b944f5a0d3f6b90305b29d70b0cca3048a50b4263"
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.3"
+  google_mlkit_translation:
+    dependency: "direct main"
+    description:
+      name: google_mlkit_translation
+      sha256: fafe02e4df45ba6e35c9ad5c1b109e4a4b0b7ae65818593f92a6319cca256567
+      url: "https://pub.dev"
+    source: hosted
+    version: "1.0.3"
   google_sign_in:
     dependency: "direct main"
     description:
@@ -997,6 +1037,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.4.0"
+  universal_io:
+    dependency: transitive
+    description:
+      name: universal_io
+      sha256: f63cbc48103236abf48e345e07a03ce5757ea86285ed313a6a032596ed9301e2
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.3.1"
   universal_platform:
     dependency: transitive
     description:
@@ -1125,6 +1173,14 @@ packages:
       url: "https://pub.dev"
     source: hosted
     version: "1.1.1"
+  whisper_ggml:
+    dependency: "direct main"
+    description:
+      name: whisper_ggml
+      sha256: "3b9bab1300b0985ac8fbba2d14106d57a1daa2ee05f0e30f01455f695ba4b354"
+      url: "https://pub.dev"
+    source: hosted
+    version: "2.10.0"
   win32:
     dependency: transitive
     description:

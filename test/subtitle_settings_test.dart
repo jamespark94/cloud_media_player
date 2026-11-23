@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:cloud_media_player/models/ai_subtitle/ai_subtitle_config.dart';
 import 'package:cloud_media_player/models/subtitle_settings.dart';
 
 void main() {
@@ -15,6 +16,9 @@ void main() {
       expect(settings.textColor, Colors.white);
       expect(settings.backgroundColor, Colors.black);
       expect(settings.backgroundOpacity, 0.5);
+      expect(settings.aiEngineType, AiSubtitleEngineType.onDevice);
+      expect(settings.aiDisplayMode, AiSubtitleDisplayMode.dual);
+      expect(settings.aiSourceLanguage, 'auto');
     });
 
     test('SubtitlePosition parse and alignment', () {
@@ -28,16 +32,19 @@ void main() {
       expect(SubtitlePosition.top.alignment, Alignment.topCenter);
     });
 
-    test('Save and load from SharedPreferences', () async {
+    test('Save and load from SharedPreferences including AI options', () async {
       SharedPreferences.setMockInitialValues({});
 
-      final customSettings = const SubtitleSettings(
+      const customSettings = SubtitleSettings(
         fontSize: 32.0,
         bottomOffset: 48.0,
         position: SubtitlePosition.top,
         textColor: Color(0xFFFFEB3B),
         backgroundColor: Color(0xFF212121),
         backgroundOpacity: 0.8,
+        aiEngineType: AiSubtitleEngineType.cloudApi,
+        aiDisplayMode: AiSubtitleDisplayMode.koreanOnly,
+        aiSourceLanguage: 'es',
       );
 
       await customSettings.save();
@@ -49,6 +56,10 @@ void main() {
       expect(loaded.textColor.toARGB32(), const Color(0xFFFFEB3B).toARGB32());
       expect(loaded.backgroundColor.toARGB32(), const Color(0xFF212121).toARGB32());
       expect(loaded.backgroundOpacity, 0.8);
+      expect(loaded.aiEngineType, AiSubtitleEngineType.cloudApi);
+      expect(loaded.aiDisplayMode, AiSubtitleDisplayMode.koreanOnly);
+      expect(loaded.aiSourceLanguage, 'es');
+      expect(loaded.showAiDualSubtitle, isFalse);
     });
 
     test('copyWith works as expected', () {
@@ -57,12 +68,16 @@ void main() {
         fontSize: 28.0,
         backgroundOpacity: 0.0,
         position: SubtitlePosition.center,
+        aiEngineType: AiSubtitleEngineType.cloudApi,
+        aiDisplayMode: AiSubtitleDisplayMode.originalOnly,
       );
 
       expect(updated.fontSize, 28.0);
       expect(updated.backgroundOpacity, 0.0);
       expect(updated.position, SubtitlePosition.center);
       expect(updated.textColor, initial.textColor);
+      expect(updated.aiEngineType, AiSubtitleEngineType.cloudApi);
+      expect(updated.aiDisplayMode, AiSubtitleDisplayMode.originalOnly);
     });
   });
 }

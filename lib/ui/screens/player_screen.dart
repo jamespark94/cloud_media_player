@@ -17,6 +17,7 @@ import '../../models/media_item.dart';
 import '../../models/player_orientation_mode.dart';
 import '../../models/video_quality.dart';
 import '../../services/account_manager.dart';
+import '../../services/ai_subtitle/ai_subtitle_service.dart';
 import '../../services/cloud_playback_sync_service.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/local_stream_proxy.dart';
@@ -397,6 +398,48 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
   }
 
+  Future<void> _bindAiSubtitleContext({
+    required String playUrl,
+    required Map<String, String> headers,
+  }) async {
+    AiSubtitleService.instance.onNotification = (msg, {bool isWarning = false}) {
+      if (!mounted) return;
+      _showNotificationBanner(
+        message: msg,
+        icon: isWarning ? Icons.warning_amber_rounded : Icons.auto_awesome,
+        iconColor: isWarning ? Colors.orangeAccent : Colors.cyanAccent,
+        duration: const Duration(seconds: 4),
+      );
+    };
+    AiSubtitleService.instance.onConfigFallback = (updatedConfig) {
+      final cur = SubtitleSettingsService.instance.settings;
+      unawaited(
+        SubtitleSettingsService.instance.updateSettings(
+          cur.copyWith(
+            aiEngineType: updatedConfig.engineType,
+            aiDisplayMode: updatedConfig.displayMode,
+            aiSourceLanguage: updatedConfig.sourceLanguage,
+          ),
+        ),
+      );
+    };
+    await SubtitleSettingsService.instance.init();
+    final savedAiSettings = SubtitleSettingsService.instance.settings;
+    unawaited(
+      AiSubtitleService.instance.bindStreamContext(
+        player: _player,
+        mediaItemId: '${widget.service.account.id}_${widget.item.id}',
+        streamUrl: playUrl,
+        httpHeaders: headers,
+        initialConfig: AiSubtitleService.instance.config.copyWith(
+          engineType: savedAiSettings.aiEngineType,
+          sourceLanguage: savedAiSettings.aiSourceLanguage,
+          displayMode: savedAiSettings.aiDisplayMode,
+        ),
+      ),
+    );
+  }
+
   Future<void> _initAndPlay() async {
     try {
       // 1. 이전 이어보기 기록 및 자막 설정 조회
@@ -555,6 +598,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
         ),
         play: true,
       );
+
+      // AI 실시간 자막 계층에 현재 스트림 컨텍스트 Read-Only 전달 (기본 OFF 상태에서는 아무 작업도 수행하지 않음)
+      await _bindAiSubtitleContext(playUrl: playUrl, headers: headers);
 
       _ensureAutoPlay();
 
@@ -739,6 +785,7 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
           ),
           play: true,
         );
+        await _bindAiSubtitleContext(playUrl: streamUrl, headers: const {});
         _ensureAutoPlay();
 
         try {
@@ -1913,6 +1960,9 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     _hideControlsTimer?.cancel();
     _exitFullScreen();
     _disposeStandbyPlayer();
+    AiSubtitleService.instance.onNotification = null;
+    AiSubtitleService.instance.onConfigFallback = null;
+    unawaited(AiSubtitleService.instance.unbindStreamContext());
     _player.dispose();
     super.dispose();
   }
@@ -2673,6 +2723,11 @@ class _PlayerScreenState extends State<PlayerScreen> with WidgetsBindingObserver
     }
 
     _bindPlayerStreams(_player);
+    AiSubtitleService.instance.onPlayerHotSwapped(
+      newPlayer: _player,
+      newStreamUrl: playUrl,
+      newHeaders: headers,
+    );
     // 핫스왑 후 버퍼링 해제 시 자동 재생 보장 (일시정지 상태로 멈추는 현상 방지)
     if (wasPlaying) {
       _ensureAutoPlay();

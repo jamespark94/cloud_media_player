@@ -1,8 +1,12 @@
+import 'dart:convert';
+import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
+import '../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../models/media_item.dart';
 import '../../models/subtitle_settings.dart';
+import '../../services/ai_subtitle/ai_subtitle_service.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/subtitle_settings_service.dart';
 import '../../utils/subtitle_utils.dart';
@@ -32,6 +36,13 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
   bool _isLoadingCloudSubs = false;
   List<MediaItem> _cloudSubtitles = [];
 
+  final TextEditingController _apiKeyController = TextEditingController();
+  bool _obscureApiKey = true;
+  bool _isSavingApiKey = false;
+  bool _isExportingSrt = false;
+  String? _aiInlineFeedback;
+  bool _aiInlineFeedbackIsWarning = false;
+
   // Foreground 추천 색상 목록
   final List<Color> _textColors = const [
     Colors.white,
@@ -58,13 +69,93 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
       initialIndex: widget.initialTabIndex.clamp(0, 1),
     );
     SubtitleSettingsService.instance.init();
+    AiSubtitleService.instance.loadGeminiApiKey();
     _findCloudSubtitles();
   }
 
   @override
   void dispose() {
+    _apiKeyController.dispose();
     _tabController.dispose();
     super.dispose();
+  }
+
+  void _setAiFeedback(String message, {bool isWarning = false}) {
+    if (!mounted) return;
+    setState(() {
+      _aiInlineFeedback = message;
+      _aiInlineFeedbackIsWarning = isWarning;
+    });
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    messenger?.hideCurrentSnackBar();
+    messenger?.showSnackBar(
+      SnackBar(
+        content: Text(message),
+        backgroundColor: isWarning ? Colors.orange.shade800 : Colors.teal.shade700,
+        duration: const Duration(seconds: 3),
+      ),
+    );
+  }
+
+  Future<void> _saveGeminiApiKey() async {
+    final input = _apiKeyController.text.trim();
+    if (input.isEmpty) {
+      _setAiFeedback('Gemini API 키를 입력해 주세요.', isWarning: true);
+      return;
+    }
+    setState(() => _isSavingApiKey = true);
+    try {
+      await AiSubtitleService.instance.saveGeminiApiKey(input);
+      _apiKeyController.clear();
+      _setAiFeedback('Gemini API 키가 보안 저장소에 안전하게 저장되었습니다.');
+    } catch (e) {
+      _setAiFeedback('API 키 저장 중 오류가 발생했습니다: $e', isWarning: true);
+    } finally {
+      if (mounted) setState(() => _isSavingApiKey = false);
+    }
+  }
+
+  Future<void> _deleteGeminiApiKey() async {
+    setState(() => _isSavingApiKey = true);
+    try {
+      await AiSubtitleService.instance.deleteGeminiApiKey();
+      _apiKeyController.clear();
+      _setAiFeedback('저장된 Gemini API 키를 삭제했습니다.');
+    } finally {
+      if (mounted) setState(() => _isSavingApiKey = false);
+    }
+  }
+
+  Future<void> _exportAiSubtitlesAsSrt(AiSubtitleDisplayMode displayMode) async {
+    final ai = AiSubtitleService.instance;
+    final srtContent = ai.exportCachedSubtitlesAsSrt(displayMode: displayMode);
+    if (srtContent.trim().isEmpty) {
+      _setAiFeedback('내보낼 수 있는 생성된 AI 자막이 아직 없습니다.', isWarning: true);
+      return;
+    }
+
+    setState(() => _isExportingSrt = true);
+    try {
+      final baseName = SubtitleUtils.getBaseName(widget.item.name);
+      final suggestedName = '${baseName}_ai.srt';
+      final bytes = Uint8List.fromList(utf8.encode(srtContent));
+      final savedUri = await FilePicker.saveFile(
+        dialogTitle: 'AI 자막 파일 내보내기 (.srt)',
+        fileName: suggestedName,
+        type: FileType.custom,
+        allowedExtensions: const ['srt'],
+        bytes: bytes,
+      );
+      if (savedUri != null) {
+        final displayPath =
+            savedUri.scheme == 'file' ? savedUri.toFilePath() : savedUri.toString();
+        _setAiFeedback('SRT 자막 저장 완료: $displayPath');
+      }
+    } catch (e) {
+      _setAiFeedback('SRT 자막 내보내기에 실패했습니다: $e', isWarning: true);
+    } finally {
+      if (mounted) setState(() => _isExportingSrt = false);
+    }
   }
 
   Future<void> _findCloudSubtitles() async {
@@ -125,8 +216,8 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
       backgroundColor: const Color(0xFF1B202B),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: Container(
-        width: 520,
-        constraints: const BoxConstraints(maxHeight: 640),
+        width: 540,
+        constraints: const BoxConstraints(maxHeight: 680),
         padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -192,16 +283,26 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
           ListTile(
             dense: true,
             leading: Icon(
-              currentSub.id == 'no' ? Icons.check_circle : Icons.radio_button_unchecked,
-              color: currentSub.id == 'no' ? Colors.blueAccent : Colors.grey,
+              currentSub.id == 'no' && !AiSubtitleService.instance.isEnabled
+                  ? Icons.check_circle
+                  : Icons.radio_button_unchecked,
+              color: currentSub.id == 'no' && !AiSubtitleService.instance.isEnabled
+                  ? Colors.blueAccent
+                  : Colors.grey,
             ),
             title: const Text('자막 끄기', style: TextStyle(color: Colors.white)),
             onTap: () {
+              if (AiSubtitleService.instance.isEnabled) {
+                AiSubtitleService.instance.setEnabled(false);
+              }
               widget.player.setSubtitleTrack(SubtitleTrack.no());
               widget.onSubtitleChanged?.call('none', 'no', '자막 끄기', null);
               Navigator.pop(context);
             },
           ),
+
+          // [실험실] AI 실시간 자막 생성 (기본값: OFF)
+          _buildAiSubtitleLabCard(),
 
           // 2. 영상 내장 자막 / 다국어 트랙 목록
           if (availableSubs.where((t) => t.id != 'no' && t.id != 'auto').isNotEmpty) ...[
@@ -322,6 +423,480 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
           const SizedBox(height: 16),
         ],
       ),
+    );
+  }
+
+  // [실험실] AI 실시간 자막 생성 카드 (기본값: OFF)
+  Widget _buildAiSubtitleLabCard() {
+    return ListenableBuilder(
+      listenable: Listenable.merge([
+        AiSubtitleService.instance,
+        SubtitleSettingsService.instance,
+      ]),
+      builder: (context, _) {
+        final ai = AiSubtitleService.instance;
+        final settings = SubtitleSettingsService.instance.settings;
+        final isOn = ai.isEnabled;
+        final selectedEngine = settings.aiEngineType;
+        final isCloud = selectedEngine == AiSubtitleEngineType.cloudApi;
+        final cachedCount = ai.cache.totalSegmentCount;
+
+        final engineSubtitle = isCloud
+            ? 'Gemini 멀티모달 고품질 전사 + 한국어 의역 (${ai.config.cloudModelName})'
+            : (ai.isTranslationSupported
+                ? '온디바이스 STT + 한국어 번역 (${ai.acceleratorLabel})'
+                : '온디바이스 원어 자막 STT (${ai.acceleratorLabel})');
+
+        return Container(
+          margin: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+          decoration: BoxDecoration(
+            color: isOn
+                ? Colors.cyanAccent.withValues(alpha: 0.08)
+                : Colors.white.withValues(alpha: 0.04),
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(
+              color: isOn ? Colors.cyanAccent.withValues(alpha: 0.45) : Colors.white12,
+              width: 1,
+            ),
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              SwitchListTile(
+                dense: true,
+                contentPadding: EdgeInsets.zero,
+                secondary: Icon(
+                  Icons.auto_awesome,
+                  color: isOn ? Colors.cyanAccent : Colors.white54,
+                  size: 22,
+                ),
+                title: const Text(
+                  '[실험실] AI 실시간 자막 생성',
+                  style: TextStyle(
+                    color: Colors.white,
+                    fontSize: 13.5,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+                subtitle: Text(
+                  engineSubtitle,
+                  style: const TextStyle(color: Colors.white60, fontSize: 11),
+                ),
+                activeThumbColor: Colors.cyanAccent,
+                value: isOn,
+                onChanged: (val) async {
+                  if (val) {
+                    await ai.loadGeminiApiKey();
+                    if (isCloud && !ai.hasGeminiApiKey) {
+                      _setAiFeedback(
+                        '클라우드 AI 사용을 위해 아래에 Gemini API 키를 먼저 입력·저장해 주세요.',
+                        isWarning: true,
+                      );
+                      return;
+                    }
+                    await ai.updateConfig(
+                      ai.config.copyWith(
+                        engineType: settings.aiEngineType,
+                        sourceLanguage: settings.aiSourceLanguage,
+                        displayMode: settings.aiDisplayMode,
+                      ),
+                    );
+                  }
+                  await ai.setEnabled(val);
+                },
+              ),
+              if (ai.statusMessage != null) ...[
+                const SizedBox(height: 4),
+                Text(
+                  ai.statusMessage!,
+                  style: const TextStyle(color: Colors.cyanAccent, fontSize: 11),
+                ),
+                if (ai.initProgress != null) ...[
+                  const SizedBox(height: 4),
+                  LinearProgressIndicator(
+                    value: ai.initProgress,
+                    color: Colors.cyanAccent,
+                    backgroundColor: Colors.white12,
+                    minHeight: 3,
+                  ),
+                ],
+              ],
+              if (_aiInlineFeedback != null) ...[
+                const SizedBox(height: 6),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+                  decoration: BoxDecoration(
+                    color: (_aiInlineFeedbackIsWarning
+                            ? Colors.orangeAccent
+                            : Colors.cyanAccent)
+                        .withValues(alpha: 0.14),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(
+                      color: (_aiInlineFeedbackIsWarning
+                              ? Colors.orangeAccent
+                              : Colors.cyanAccent)
+                          .withValues(alpha: 0.45),
+                    ),
+                  ),
+                  child: Text(
+                    _aiInlineFeedback!,
+                    style: TextStyle(
+                      color: _aiInlineFeedbackIsWarning
+                          ? Colors.orangeAccent
+                          : Colors.cyanAccent,
+                      fontSize: 11,
+                    ),
+                  ),
+                ),
+              ],
+              const Divider(color: Colors.white12, height: 16),
+
+              // 1. 엔진 선택
+              const Text(
+                'AI 자막 엔진 선택',
+                style: TextStyle(color: Colors.white70, fontSize: 11.5, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 8,
+                runSpacing: 6,
+                children: [
+                  for (final engineType in AiSubtitleEngineType.values)
+                    ChoiceChip(
+                      label: Text(
+                        engineType.label,
+                        style: TextStyle(
+                          fontSize: 11.5,
+                          color: selectedEngine == engineType
+                              ? Colors.black
+                              : Colors.white70,
+                          fontWeight: selectedEngine == engineType
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                        ),
+                      ),
+                      selected: selectedEngine == engineType,
+                      selectedColor: Colors.cyanAccent,
+                      backgroundColor: const Color(0xFF252C3B),
+                      side: BorderSide(
+                        color: selectedEngine == engineType
+                            ? Colors.cyanAccent
+                            : Colors.white12,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (selected) async {
+                        if (!selected || selectedEngine == engineType) return;
+                        await SubtitleSettingsService.instance.updateSettings(
+                          settings.copyWith(aiEngineType: engineType),
+                        );
+                        await ai.updateConfig(
+                          ai.config.copyWith(engineType: engineType),
+                        );
+                      },
+                    ),
+                ],
+              ),
+
+              // 2. Windows 로컬 온디바이스 번역 미지원 안내 또는 클라우드 AI API Key 설정 UI
+              if (!isCloud && !ai.isTranslationSupported) ...[
+                const SizedBox(height: 8),
+                Container(
+                  width: double.infinity,
+                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.withValues(alpha: 0.12),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amber.withValues(alpha: 0.45)),
+                  ),
+                  child: Row(
+                    children: [
+                      const Icon(Icons.info_outline, size: 16, color: Colors.amber),
+                      const SizedBox(width: 8),
+                      const Expanded(
+                        child: Text(
+                          'Windows 로컬 온디바이스 모드는 한국어 번역 없이 원어 자막만 생성됩니다. 한국어 번역 자막은 클라우드 AI를 선택하세요.',
+                          style: TextStyle(color: Colors.amberAccent, fontSize: 11),
+                        ),
+                      ),
+                      const SizedBox(width: 6),
+                      TextButton(
+                        style: TextButton.styleFrom(
+                          foregroundColor: Colors.cyanAccent,
+                          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                          minimumSize: Size.zero,
+                          tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+                        ),
+                        onPressed: () async {
+                          await SubtitleSettingsService.instance.updateSettings(
+                            settings.copyWith(aiEngineType: AiSubtitleEngineType.cloudApi),
+                          );
+                          await ai.updateConfig(
+                            ai.config.copyWith(engineType: AiSubtitleEngineType.cloudApi),
+                          );
+                        },
+                        child: const Text('클라우드 전환', style: TextStyle(fontSize: 11, fontWeight: FontWeight.bold)),
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+              if (isCloud) ...[
+                const SizedBox(height: 10),
+                Container(
+                  padding: const EdgeInsets.all(10),
+                  decoration: BoxDecoration(
+                    color: Colors.black.withValues(alpha: 0.25),
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.white12),
+                  ),
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Row(
+                        children: [
+                          const Icon(Icons.vpn_key, size: 15, color: Colors.cyanAccent),
+                          const SizedBox(width: 6),
+                          const Text(
+                            'Gemini API Key (로컬 보안 저장)',
+                            style: TextStyle(
+                              color: Colors.white,
+                              fontSize: 11.5,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const Spacer(),
+                          Container(
+                            padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                            decoration: BoxDecoration(
+                              color: (ai.hasGeminiApiKey
+                                      ? Colors.greenAccent
+                                      : Colors.orangeAccent)
+                                  .withValues(alpha: 0.16),
+                              borderRadius: BorderRadius.circular(4),
+                            ),
+                            child: Text(
+                              ai.hasGeminiApiKey
+                                  ? '저장됨 (${ai.maskedGeminiApiKey ?? ''})'
+                                  : '미입력',
+                              style: TextStyle(
+                                fontSize: 10,
+                                color: ai.hasGeminiApiKey
+                                    ? Colors.greenAccent
+                                    : Colors.orangeAccent,
+                              ),
+                            ),
+                          ),
+                        ],
+                      ),
+                      const SizedBox(height: 8),
+                      Row(
+                        children: [
+                          Expanded(
+                            child: TextField(
+                              controller: _apiKeyController,
+                              obscureText: _obscureApiKey,
+                              style: const TextStyle(color: Colors.white, fontSize: 12),
+                              decoration: InputDecoration(
+                                isDense: true,
+                                hintText: ai.hasGeminiApiKey
+                                    ? '새 Gemini API Key 입력 시 덮어쓰기'
+                                    : 'AIza... 형태의 Gemini API Key 입력',
+                                hintStyle: const TextStyle(color: Colors.white38, fontSize: 11),
+                                contentPadding: const EdgeInsets.symmetric(
+                                  horizontal: 10,
+                                  vertical: 8,
+                                ),
+                                filled: true,
+                                fillColor: const Color(0xFF141821),
+                                border: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(6),
+                                  borderSide: const BorderSide(color: Colors.white12),
+                                ),
+                                enabledBorder: OutlineInputBorder(
+                                  borderRadius: BorderRadius.circular(6),
+                                  borderSide: const BorderSide(color: Colors.white12),
+                                ),
+                                suffixIcon: IconButton(
+                                  icon: Icon(
+                                    _obscureApiKey
+                                        ? Icons.visibility_off
+                                        : Icons.visibility,
+                                    size: 16,
+                                    color: Colors.white54,
+                                  ),
+                                  onPressed: () {
+                                    setState(() => _obscureApiKey = !_obscureApiKey);
+                                  },
+                                ),
+                              ),
+                            ),
+                          ),
+                          const SizedBox(width: 6),
+                          ElevatedButton(
+                            onPressed: _isSavingApiKey ? null : _saveGeminiApiKey,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: Colors.cyanAccent,
+                              foregroundColor: Colors.black,
+                              padding: const EdgeInsets.symmetric(
+                                horizontal: 12,
+                                vertical: 9,
+                              ),
+                              minimumSize: Size.zero,
+                            ),
+                            child: const Text(
+                              '저장',
+                              style: TextStyle(fontSize: 11.5, fontWeight: FontWeight.bold),
+                            ),
+                          ),
+                          if (ai.hasGeminiApiKey) ...[
+                            const SizedBox(width: 4),
+                            IconButton(
+                              tooltip: '저장된 API Key 삭제',
+                              icon: const Icon(
+                                Icons.delete_outline,
+                                size: 18,
+                                color: Colors.redAccent,
+                              ),
+                              onPressed: _isSavingApiKey ? null : _deleteGeminiApiKey,
+                            ),
+                          ],
+                        ],
+                      ),
+                    ],
+                  ),
+                ),
+              ],
+
+              const SizedBox(height: 10),
+
+              // 3. 표시 모드 선택
+              const Text(
+                '표시 모드',
+                style: TextStyle(color: Colors.white70, fontSize: 11.5, fontWeight: FontWeight.w600),
+              ),
+              const SizedBox(height: 6),
+              Wrap(
+                spacing: 6,
+                runSpacing: 6,
+                children: [
+                  for (final mode in AiSubtitleDisplayMode.values)
+                    ChoiceChip(
+                      label: Text(
+                        mode.label,
+                        style: TextStyle(
+                          fontSize: 11,
+                          color: settings.aiDisplayMode == mode
+                              ? Colors.black
+                              : Colors.white70,
+                          fontWeight: settings.aiDisplayMode == mode
+                              ? FontWeight.w600
+                              : FontWeight.normal,
+                        ),
+                      ),
+                      selected: settings.aiDisplayMode == mode,
+                      selectedColor: Colors.cyanAccent,
+                      backgroundColor: const Color(0xFF252C3B),
+                      side: BorderSide(
+                        color: settings.aiDisplayMode == mode
+                            ? Colors.cyanAccent
+                            : Colors.white12,
+                      ),
+                      visualDensity: VisualDensity.compact,
+                      onSelected: (selected) {
+                        if (!selected) return;
+                        SubtitleSettingsService.instance.updateSettings(
+                          settings.copyWith(aiDisplayMode: mode),
+                        );
+                        ai.updateConfig(ai.config.copyWith(displayMode: mode));
+                        if (!isCloud &&
+                            !ai.isTranslationSupported &&
+                            mode != AiSubtitleDisplayMode.originalOnly) {
+                          _setAiFeedback(
+                            'Windows 로컬 온디바이스는 원어 자막만 지원합니다. 한국어 번역을 원하시면 [클라우드 AI]를 선택해 주세요.',
+                            isWarning: true,
+                          );
+                        }
+                      },
+                    ),
+                ],
+              ),
+
+              const SizedBox(height: 8),
+
+              // 4. 원본 음성 언어 힌트
+              Row(
+                children: [
+                  const Text(
+                    '영상 속 음성 언어 (힌트)',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                  const Spacer(),
+                  DropdownButton<String>(
+                    value: AiSourceLanguageOption.presets
+                            .any((p) => p.code == settings.aiSourceLanguage)
+                        ? settings.aiSourceLanguage
+                        : 'auto',
+                    dropdownColor: const Color(0xFF1B202B),
+                    underline: const SizedBox.shrink(),
+                    style: const TextStyle(color: Colors.cyanAccent, fontSize: 12),
+                    items: [
+                      for (final opt in AiSourceLanguageOption.presets)
+                        DropdownMenuItem(
+                          value: opt.code,
+                          child: Text(opt.label),
+                        ),
+                    ],
+                    onChanged: (lang) {
+                      if (lang == null) return;
+                      SubtitleSettingsService.instance.updateSettings(
+                        settings.copyWith(aiSourceLanguage: lang),
+                      );
+                      ai.updateConfig(ai.config.copyWith(sourceLanguage: lang));
+                    },
+                  ),
+                ],
+              ),
+
+              const SizedBox(height: 6),
+
+              // 5. 생성·캐싱된 AI 자막 .srt 내보내기 버튼
+              SizedBox(
+                width: double.infinity,
+                child: OutlinedButton.icon(
+                  icon: _isExportingSrt
+                      ? const SizedBox(
+                          width: 14,
+                          height: 14,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Icon(Icons.download_rounded, size: 16),
+                  label: Text(
+                    cachedCount > 0
+                        ? '자막 내보내기 (.srt · $cachedCount개 구간)'
+                        : '자막 내보내기 (.srt)',
+                    style: const TextStyle(fontSize: 12),
+                  ),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor:
+                        cachedCount > 0 ? Colors.cyanAccent : Colors.white54,
+                    side: BorderSide(
+                      color: cachedCount > 0
+                          ? Colors.cyanAccent.withValues(alpha: 0.6)
+                          : Colors.white24,
+                    ),
+                    padding: const EdgeInsets.symmetric(vertical: 8),
+                  ),
+                  onPressed: _isExportingSrt
+                      ? null
+                      : () => _exportAiSubtitlesAsSrt(settings.aiDisplayMode),
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 

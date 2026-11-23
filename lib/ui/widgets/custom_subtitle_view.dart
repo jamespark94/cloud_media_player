@@ -2,6 +2,7 @@ import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import '../../models/subtitle_settings.dart';
+import '../../services/ai_subtitle/ai_subtitle_service.dart';
 import '../../services/subtitle_settings_service.dart';
 
 class CustomSubtitleView extends StatefulWidget {
@@ -73,67 +74,198 @@ class _CustomSubtitleViewState extends State<CustomSubtitleView> {
     super.dispose();
   }
 
+  Widget _buildSubtitleBox({
+    required String text,
+    required SubtitleSettings settings,
+    required double fontSize,
+    required Color textColor,
+    String? badgeLabel,
+    Color? borderColor,
+  }) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+      decoration: BoxDecoration(
+        color: settings.backgroundOpacity > 0.0
+            ? settings.backgroundColor.withValues(
+                alpha: settings.backgroundOpacity.clamp(0.0, 1.0),
+              )
+            : (borderColor != null
+                ? Colors.black.withValues(alpha: 0.45)
+                : Colors.transparent),
+        borderRadius: BorderRadius.circular(8),
+        border: borderColor != null
+            ? Border.all(color: borderColor, width: 1)
+            : null,
+      ),
+      child: badgeLabel != null
+          ? Row(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.center,
+              children: [
+                Container(
+                  margin: const EdgeInsets.only(right: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 5, vertical: 2),
+                  decoration: BoxDecoration(
+                    color: Colors.cyanAccent.withValues(alpha: 0.2),
+                    borderRadius: BorderRadius.circular(4),
+                    border: Border.all(
+                      color: Colors.cyanAccent.withValues(alpha: 0.6),
+                      width: 0.8,
+                    ),
+                  ),
+                  child: Text(
+                    badgeLabel,
+                    style: const TextStyle(
+                      fontSize: 10,
+                      color: Colors.cyanAccent,
+                      fontWeight: FontWeight.bold,
+                    ),
+                  ),
+                ),
+                Flexible(
+                  child: Text(
+                    text,
+                    textAlign: TextAlign.center,
+                    style: _subtitleTextStyle(
+                      fontSize: fontSize,
+                      color: textColor,
+                    ),
+                  ),
+                ),
+              ],
+            )
+          : Text(
+              text,
+              textAlign: TextAlign.center,
+              style: _subtitleTextStyle(
+                fontSize: fontSize,
+                color: textColor,
+              ),
+            ),
+    );
+  }
+
+  TextStyle _subtitleTextStyle({
+    required double fontSize,
+    required Color color,
+  }) {
+    return TextStyle(
+      fontSize: fontSize,
+      color: color,
+      fontWeight: FontWeight.w600,
+      height: 1.35,
+      shadows: [
+        Shadow(
+          offset: const Offset(1.2, 1.2),
+          blurRadius: 2.5,
+          color: Colors.black.withValues(alpha: 0.95),
+        ),
+        Shadow(
+          offset: const Offset(-1.2, -1.2),
+          blurRadius: 2.5,
+          color: Colors.black.withValues(alpha: 0.95),
+        ),
+        Shadow(
+          offset: const Offset(1.2, -1.2),
+          blurRadius: 2.5,
+          color: Colors.black.withValues(alpha: 0.95),
+        ),
+        Shadow(
+          offset: const Offset(-1.2, 1.2),
+          blurRadius: 2.5,
+          color: Colors.black.withValues(alpha: 0.95),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListenableBuilder(
-      listenable: SubtitleSettingsService.instance,
+      listenable: Listenable.merge([
+        SubtitleSettingsService.instance,
+        AiSubtitleService.instance,
+      ]),
       builder: (context, _) {
         final settings = SubtitleSettingsService.instance.settings;
+        final aiService = AiSubtitleService.instance;
 
-        final lines = _subtitle
+        final origLines = _subtitle
             .where((s) => s.trim().isNotEmpty)
             .map((s) => s.trim())
             .toList();
 
-        if (lines.isEmpty) {
+        List<String> aiLines = const [];
+        bool isAiStatusOnly = false;
+        if (aiService.isEnabled) {
+          final seg = aiService.currentSegment;
+          if (seg != null) {
+            final formatted = seg.formatForDisplay(
+              displayMode: settings.aiDisplayMode,
+            );
+            aiLines = formatted
+                .split('\n')
+                .where((s) => s.trim().isNotEmpty)
+                .map((s) => s.trim())
+                .toList();
+          } else if (aiService.isInitializing || aiService.isProcessingChunk) {
+            final status = aiService.statusMessage ?? 'AI 실시간 자막 분석 중...';
+            aiLines = [status];
+            isAiStatusOnly = true;
+          }
+        }
+
+        if (origLines.isEmpty && aiLines.isEmpty) {
           return const SizedBox.shrink();
         }
 
-        final text = lines.join('\n');
+        final hasBoth = origLines.isNotEmpty && aiLines.isNotEmpty;
 
-        Widget subtitleBox = Container(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
-          decoration: BoxDecoration(
-            color: settings.backgroundOpacity > 0.0
-                ? settings.backgroundColor.withValues(
-                    alpha: settings.backgroundOpacity.clamp(0.0, 1.0),
-                  )
-                : Colors.transparent,
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(
-            text,
-            textAlign: TextAlign.center,
-            style: TextStyle(
-              fontSize: settings.fontSize,
-              color: settings.textColor,
-              fontWeight: FontWeight.w600,
-              height: 1.35,
-              shadows: [
-                Shadow(
-                  offset: const Offset(1.2, 1.2),
-                  blurRadius: 2.5,
-                  color: Colors.black.withValues(alpha: 0.95),
-                ),
-                Shadow(
-                  offset: const Offset(-1.2, -1.2),
-                  blurRadius: 2.5,
-                  color: Colors.black.withValues(alpha: 0.95),
-                ),
-                Shadow(
-                  offset: const Offset(1.2, -1.2),
-                  blurRadius: 2.5,
-                  color: Colors.black.withValues(alpha: 0.95),
-                ),
-                Shadow(
-                  offset: const Offset(-1.2, 1.2),
-                  blurRadius: 2.5,
-                  color: Colors.black.withValues(alpha: 0.95),
-                ),
-              ],
-            ),
-          ),
-        );
+        Widget subtitleContent;
+        if (hasBoth) {
+          // 원 자막(SMI/SRT)과 AI 자막을 위아래로 동시 표시해 정확도 비교 가능
+          subtitleContent = Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              _buildSubtitleBox(
+                text: aiLines.join('\n'),
+                settings: settings,
+                fontSize: isAiStatusOnly
+                    ? (settings.fontSize * 0.6).clamp(11.0, 16.0)
+                    : (settings.fontSize * 0.88).clamp(13.0, 38.0),
+                textColor: isAiStatusOnly
+                    ? Colors.cyanAccent
+                    : const Color(0xFFB2F5EA),
+                badgeLabel: 'AI',
+                borderColor: Colors.cyanAccent.withValues(alpha: 0.45),
+              ),
+              const SizedBox(height: 6),
+              _buildSubtitleBox(
+                text: origLines.join('\n'),
+                settings: settings,
+                fontSize: settings.fontSize,
+                textColor: settings.textColor,
+              ),
+            ],
+          );
+        } else if (aiLines.isNotEmpty) {
+          subtitleContent = _buildSubtitleBox(
+            text: aiLines.join('\n'),
+            settings: settings,
+            fontSize: isAiStatusOnly
+                ? (settings.fontSize * 0.65).clamp(12.0, 18.0)
+                : settings.fontSize,
+            textColor: isAiStatusOnly ? Colors.cyanAccent : settings.textColor,
+          );
+        } else {
+          subtitleContent = _buildSubtitleBox(
+            text: origLines.join('\n'),
+            settings: settings,
+            fontSize: settings.fontSize,
+            textColor: settings.textColor,
+          );
+        }
 
         Widget positionedContent;
         switch (settings.position) {
@@ -144,7 +276,7 @@ class _CustomSubtitleViewState extends State<CustomSubtitleView> {
               top: settings.bottomOffset,
               child: Align(
                 alignment: Alignment.topCenter,
-                child: subtitleBox,
+                child: subtitleContent,
               ),
             );
             break;
@@ -155,7 +287,7 @@ class _CustomSubtitleViewState extends State<CustomSubtitleView> {
               top: 0,
               bottom: 0,
               child: Center(
-                child: subtitleBox,
+                child: subtitleContent,
               ),
             );
             break;
@@ -166,7 +298,7 @@ class _CustomSubtitleViewState extends State<CustomSubtitleView> {
               bottom: settings.bottomOffset,
               child: Align(
                 alignment: Alignment.bottomCenter,
-                child: subtitleBox,
+                child: subtitleContent,
               ),
             );
             break;
