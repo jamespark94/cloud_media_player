@@ -25,3 +25,19 @@
 -keepclasseswithmembernames class * {
     native <methods>;
 }
+
+# Firebase Components & ML Kit ComponentRegistrars
+# (AGP/R8 full mode strips no-arg <init>() if only class is kept without members)
+-keep class * implements com.google.firebase.components.ComponentRegistrar {
+    <init>();
+    *;
+}
+-keep class com.google.firebase.components.** { *; }
+
+# Google ML Kit Translation & Common
+-keep class com.google.mlkit.** { *; }
+-keep class com.google.android.gms.internal.mlkit_common.** { *; }
+-keep class com.google.android.gms.internal.mlkit_translate.** { *; }
+-keep class com.google_mlkit_translation.** { *; }
+-keep class com.google_mlkit_commons.** { *; }
+-dontwarn com.google.mlkit.**

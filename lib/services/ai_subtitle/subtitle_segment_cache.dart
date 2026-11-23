@@ -238,6 +238,7 @@ class SubtitleSegmentCache {
       if (completedBuckets.isEmpty) return;
 
       final payload = jsonEncode({
+        'cacheVersion': 2,
         'chunkSeconds': chunkSeconds,
         'buckets': completedBuckets,
       });
@@ -255,6 +256,7 @@ class SubtitleSegmentCache {
       if (raw.isEmpty) return;
       final decoded = jsonDecode(raw);
       if (decoded is! Map<String, dynamic>) return;
+      if ((decoded['cacheVersion'] as num?)?.toInt() != 2) return;
       if ((decoded['chunkSeconds'] as num?)?.toInt() != chunkSeconds) return;
 
       final bucketsMap = decoded['buckets'];

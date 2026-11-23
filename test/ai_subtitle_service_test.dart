@@ -14,7 +14,9 @@ import 'package:cloud_media_player/services/ai_subtitle/extractors/ffmpeg_kit_ch
 import 'package:cloud_media_player/services/ai_subtitle/stt/whisper_isolate_worker.dart';
 import 'package:cloud_media_player/services/ai_subtitle/subtitle_generator_engine.dart';
 import 'package:cloud_media_player/services/ai_subtitle/subtitle_segment_cache.dart';
+import 'package:cloud_media_player/services/ai_subtitle/translators/mlkit_subtitle_translator.dart';
 import 'package:cloud_media_player/services/ai_subtitle/translators/subtitle_translator.dart';
+import 'package:google_mlkit_translation/google_mlkit_translation.dart';
 
 class _FakeSubtitleEngine implements SubtitleGeneratorEngine {
   bool supported = true;
@@ -148,6 +150,85 @@ class _MockHttpAdapter implements HttpClientAdapter {
 
   @override
   void close({bool force = false}) {}
+}
+
+class _FakeModelManager extends OnDeviceTranslatorModelManager {
+  final Set<String> downloadedModels;
+  final Set<String> failingDownloads;
+  final List<String> downloadAttempts = [];
+
+  _FakeModelManager({
+    Set<String>? downloadedModels,
+    Set<String>? failingDownloads,
+  })  : downloadedModels = downloadedModels ?? <String>{},
+        failingDownloads = failingDownloads ?? <String>{};
+
+  @override
+  Future<bool> isModelDownloaded(String model) async {
+    return downloadedModels.contains(model);
+  }
+
+  @override
+  Future<bool> downloadModel(String model, {bool isWifiRequired = true}) async {
+    downloadAttempts.add(model);
+    if (failingDownloads.contains(model)) {
+      return false;
+    }
+    downloadedModels.add(model);
+    return true;
+  }
+}
+
+class _FakeOnDeviceTranslator extends OnDeviceTranslator {
+  final List<(TranslateLanguage, TranslateLanguage, String)> calls;
+  final String Function(
+    TranslateLanguage source,
+    TranslateLanguage target,
+    String text,
+  ) onTranslate;
+
+  _FakeOnDeviceTranslator({
+    required super.sourceLanguage,
+    required super.targetLanguage,
+    required this.calls,
+    required this.onTranslate,
+  });
+
+  @override
+  Future<String> translateText(String text) async {
+    calls.add((sourceLanguage, targetLanguage, text));
+    return onTranslate(sourceLanguage, targetLanguage, text);
+  }
+
+  @override
+  Future<void> close() async {}
+}
+
+class _FakeWhisperWorker extends WhisperIsolateWorker {
+  final List<SubtitleSegment> cannedSegments;
+  _FakeWhisperWorker(this.cannedSegments);
+
+  @override
+  Future<bool> isAvailable() async => true;
+
+  @override
+  Future<void> initialize({
+    required AiWhisperModelTier tier,
+    void Function(double progress, String status)? onProgress,
+  }) async {}
+
+  @override
+  Future<List<SubtitleSegment>> transcribeChunk({
+    required String wavPath,
+    required Duration chunkOffset,
+    required Duration chunkDuration,
+    required String sourceLanguage,
+  }) async {
+    return cannedSegments;
+  }
+
+  @override
+  Future<void> release() async {}
 }
 
 void main() {
@@ -487,6 +568,128 @@ void main() {
       await translator.initialize(sourceLang: 'en');
       expect(await translator.translate('Hello'), isNull);
       await translator.dispose();
+    });
+
+    test('MlKitSubtitleTranslator auto mode translates Japanese to Korean instead of forcing en->ko', () async {
+      final modelManager = _FakeModelManager(downloadedModels: {'ko'});
+      final calls = <(TranslateLanguage, TranslateLanguage, String)>[];
+
+      final translator = MlKitSubtitleTranslator(
+        modelManager: modelManager,
+        translatorFactory: (src, tgt) => _FakeOnDeviceTranslator(
+          sourceLanguage: src,
+          targetLanguage: tgt,
+          calls: calls,
+          onTranslate: (s, t, text) {
+            if (s == TranslateLanguage.japanese && t == TranslateLanguage.korean) {
+              return '좋은 아침입니다';
+            }
+            return text;
+          },
+        ),
+      );
+
+      await translator.initialize(sourceLang: 'auto', targetLang: 'ko');
+      final result = await translator.translate(
+        'おはようございます',
+        detectedSourceLang: 'auto',
+      );
+
+      expect(result, '좋은 아침입니다');
+      expect(calls, [(TranslateLanguage.japanese, TranslateLanguage.korean, 'おはようございます')]);
+      expect(modelManager.downloadedModels, contains('ja'));
+      expect(modelManager.downloadedModels, isNot(contains('en')));
+      await translator.dispose();
+    });
+
+    test('MlKitSubtitleTranslator retries model download after failure instead of caching broken state', () async {
+      final modelManager = _FakeModelManager(
+        downloadedModels: {'ko'},
+        failingDownloads: {'ja'},
+      );
+      final calls = <(TranslateLanguage, TranslateLanguage, String)>[];
+
+      final translator = MlKitSubtitleTranslator(
+        modelManager: modelManager,
+        translatorFactory: (src, tgt) => _FakeOnDeviceTranslator(
+          sourceLanguage: src,
+          targetLanguage: tgt,
+          calls: calls,
+          onTranslate: (s, t, text) => '안녕하세요',
+        ),
+      );
+
+      await translator.initialize(sourceLang: 'ja', targetLang: 'ko');
+      expect(await translator.translate('こんにちは', detectedSourceLang: 'ja'), isNull);
+      expect(translator.lastErrorMessage, isNotNull);
+
+      // 네트워크 복구 후 재시도 시 정상 다운로드 및 번역 성공
+      modelManager.failingDownloads.remove('ja');
+      final retried = await translator.translate('こんにちは', detectedSourceLang: 'ja');
+      expect(retried, '안녕하세요');
+      expect(translator.lastErrorMessage, isNull);
+      await translator.dispose();
+    });
+
+    test('OnDeviceSubtitleEngine propagates Japanese chunk context to Kanji-only segments in auto mode', () async {
+      final modelManager = _FakeModelManager(downloadedModels: {'ko', 'ja'});
+      final calls = <(TranslateLanguage, TranslateLanguage, String)>[];
+
+      final translator = MlKitSubtitleTranslator(
+        modelManager: modelManager,
+        translatorFactory: (src, tgt) => _FakeOnDeviceTranslator(
+          sourceLanguage: src,
+          targetLanguage: tgt,
+          calls: calls,
+          onTranslate: (s, t, text) {
+            if (s == TranslateLanguage.japanese) {
+              return text == '大丈夫' ? '괜찮아' : '안녕하세요';
+            }
+            return text;
+          },
+        ),
+      );
+
+      final engine = OnDeviceSubtitleEngine(
+        extractor: _FakeAudioExtractor(),
+        whisperWorker: _FakeWhisperWorker(const [
+          SubtitleSegment(
+            startTime: Duration(seconds: 1),
+            endTime: Duration(seconds: 3),
+            originalText: 'こんにちは',
+          ),
+          SubtitleSegment(
+            startTime: Duration(seconds: 4),
+            endTime: Duration(seconds: 6),
+            originalText: '大丈夫',
+          ),
+        ]),
+        translator: translator,
+      );
+
+      await engine.initialize(sourceLanguage: 'auto', targetLanguage: 'ko');
+      final segments = await engine
+          .generateSubtitlesForChunk(
+            const AudioChunkRequest(
+              mediaItemId: 'vid_ja',
+              streamUrl: 'https://example.com/ja.mp4',
+              httpHeaders: {},
+              chunkStart: Duration.zero,
+              chunkDuration: Duration(seconds: 20),
+              sourceLanguage: 'auto',
+              targetLanguage: 'ko',
+            ),
+          )
+          .toList();
+
+      expect(segments.length, 2);
+      expect(segments[0].translatedText, '안녕하세요');
+      expect(segments[1].translatedText, '괜찮아');
+      expect(
+        calls.every((c) => c.$1 == TranslateLanguage.japanese && c.$2 == TranslateLanguage.korean),
+        isTrue,
+      );
+      await engine.dispose();
     });
   });
 

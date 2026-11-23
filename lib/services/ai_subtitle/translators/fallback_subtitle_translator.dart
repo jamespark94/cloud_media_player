@@ -12,9 +12,13 @@ class FallbackSubtitleTranslator implements SubtitleTranslator {
   String get translatorName => 'Original Only (Windows Safe Mode)';
 
   @override
+  String? get lastErrorMessage => null;
+
+  @override
   Future<void> initialize({
     required String sourceLang,
     String targetLang = 'ko',
+    void Function(double progress, String status)? onProgress,
   }) async {}
 
   @override

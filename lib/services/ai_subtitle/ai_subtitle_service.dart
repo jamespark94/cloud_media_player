@@ -86,6 +86,7 @@ class AiSubtitleService extends ChangeNotifier {
   int _lastBucketIndex = -1;
   int _consecutiveErrors = 0;
   bool _hasNotifiedPlatformMode = false;
+  bool _hasNotifiedTranslationError = false;
   bool _isSchedulerRunning = false;
   int _jobEpoch = 0;
   Timer? _seekDebounceTimer;
@@ -167,6 +168,7 @@ class AiSubtitleService extends ChangeNotifier {
     _lastBucketIndex = -1;
     _consecutiveErrors = 0;
     _hasNotifiedPlatformMode = false;
+    _hasNotifiedTranslationError = false;
 
     if (initialConfig != null) {
       _config = initialConfig;
@@ -251,6 +253,8 @@ class AiSubtitleService extends ChangeNotifier {
 
     _consecutiveErrors = 0;
     _hasNotifiedPlatformMode = false;
+    _hasNotifiedTranslationError = false;
+    _hasNotifiedTranslationError = false;
     await _keyStorage.loadApiKey();
     notifyListeners();
 
@@ -280,6 +284,7 @@ class AiSubtitleService extends ChangeNotifier {
       _lastBucketIndex = -1;
       _consecutiveErrors = 0;
       _hasNotifiedPlatformMode = false;
+      _hasNotifiedTranslationError = false;
       await _cache.persistToDisk();
 
       _recreateCacheIfBucketSizeChanged();
@@ -295,6 +300,13 @@ class AiSubtitleService extends ChangeNotifier {
       if ((engineChanged || tierChanged || cloudModelChanged) &&
           _injectedEngine == null) {
         await _disposeActiveEngine();
+      } else if (languageChanged &&
+          _engine is OnDeviceSubtitleEngine &&
+          _isEngineInitialized) {
+        await (_engine as OnDeviceSubtitleEngine).updateLanguages(
+          sourceLanguage: _config.sourceLanguage,
+          targetLanguage: _config.targetLanguage,
+        );
       }
 
       if (_isEnabled && _boundPlayer != null) {
@@ -670,6 +682,19 @@ class AiSubtitleService extends ChangeNotifier {
       }
       _cache.markCompleted(bucketIndex);
       _consecutiveErrors = 0;
+      if (!_hasNotifiedTranslationError &&
+          engine is OnDeviceSubtitleEngine &&
+          engine.isTranslationSupported &&
+          engine.lastTranslationError != null) {
+        _hasNotifiedTranslationError = true;
+        final rawErr = engine.lastTranslationError!;
+        final shortErr =
+            rawErr.length > 120 ? '${rawErr.substring(0, 120)}...' : rawErr;
+        onNotification?.call(
+          '온디바이스 한국어 번역 모델 준비에 실패해 원어 자막으로 표시됩니다. ($shortErr)',
+          isWarning: true,
+        );
+      }
       unawaited(_cache.persistToDisk());
     } on CloudAiException catch (e) {
       if (e.type == CloudAiErrorType.cancelled ||

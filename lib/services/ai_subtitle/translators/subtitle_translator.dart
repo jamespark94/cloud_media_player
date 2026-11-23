@@ -12,10 +12,14 @@ abstract class SubtitleTranslator {
   /// 플랫폼별 번역기 설명 문자열.
   String get translatorName;
 
+  /// 마지막 번역/모델 다운로드 오류 메시지(정상 시 `null`).
+  String? get lastErrorMessage => null;
+
   /// 원본 언어 -> 목표 언어 번역 모델 초기화.
   Future<void> initialize({
     required String sourceLang,
     String targetLang = 'ko',
+    void Function(double progress, String status)? onProgress,
   });
 
   /// 원어 텍스트를 한국어로 번역합니다.

@@ -6,6 +6,7 @@ import '../../../models/ai_subtitle/subtitle_segment.dart';
 import '../extractors/audio_chunk_extractor.dart';
 import '../stt/whisper_isolate_worker.dart';
 import '../subtitle_generator_engine.dart';
+import '../translators/mlkit_subtitle_translator.dart';
 import '../translators/subtitle_translator.dart';
 
 /// Phase 1 온디바이스 경량 MVP 자막 생성 엔진.
@@ -21,6 +22,7 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
 
   int _chunkSeq = 0;
   bool _isCancelled = false;
+  String? _sessionPreferredCjkLang;
 
   OnDeviceSubtitleEngine({
     this.modelTier = AiWhisperModelTier.tiny,
@@ -42,6 +44,8 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
 
   bool get isTranslationSupported => _translator.isTranslationSupported;
 
+  String? get lastTranslationError => _translator.lastErrorMessage;
+
   @override
   Future<bool> isSupported() async {
     final whisperOk = await _whisperWorker.isAvailable();
@@ -55,10 +59,24 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
     String sourceLanguage = 'auto',
     String targetLanguage = 'ko',
   }) async {
+    _sessionPreferredCjkLang = null;
     await _whisperWorker.initialize(
       tier: modelTier,
       onProgress: onProgress,
     );
+    await _translator.initialize(
+      sourceLang: sourceLanguage,
+      targetLang: targetLanguage,
+      onProgress: onProgress,
+    );
+  }
+
+  /// Whisper 모델 재로딩 없이 번역기 언어 설정만 갱신합니다.
+  Future<void> updateLanguages({
+    required String sourceLanguage,
+    String targetLanguage = 'ko',
+  }) async {
+    _sessionPreferredCjkLang = null;
     await _translator.initialize(
       sourceLang: sourceLanguage,
       targetLang: targetLanguage,
@@ -100,14 +118,28 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
         sourceLanguage: request.sourceLanguage,
       );
 
+      // `auto` 모드에서 청크 내 일본어 가나가 감지되면 한자 단독 세그먼트("大丈夫" 등)도 일본어로 해석
+      if (request.sourceLanguage == 'auto') {
+        final hasKana = rawSegments.any(
+          (s) => MlKitSubtitleTranslator.containsJapaneseKana(s.originalText),
+        );
+        if (hasKana) {
+          _sessionPreferredCjkLang = 'ja';
+        }
+      }
+
       // 3. 플랫폼별 로컬 번역 (Windows는 null 반환 -> 원어 자막 단독 유지)
       for (final seg in rawSegments) {
         if (_isCancelled) return;
         String? translated;
         if (_translator.isTranslationSupported) {
+          final hint = _resolveTranslationHint(
+            requestSourceLanguage: request.sourceLanguage,
+            segment: seg,
+          );
           translated = await _translator.translate(
             seg.originalText,
-            detectedSourceLang: request.sourceLanguage,
+            detectedSourceLang: hint,
           );
         }
         yield seg.copyWith(translatedText: translated);
@@ -120,6 +152,27 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
         debugPrint('[OnDeviceSubtitleEngine] 임시 WAV 삭제 무시: $e');
       }
     }
+  }
+
+  String _resolveTranslationHint({
+    required String requestSourceLanguage,
+    required SubtitleSegment segment,
+  }) {
+    if (requestSourceLanguage.isNotEmpty && requestSourceLanguage != 'auto') {
+      return requestSourceLanguage;
+    }
+    final segLang = segment.languageCode;
+    if (segLang != null && segLang.isNotEmpty && segLang != 'auto') {
+      return segLang;
+    }
+    if (MlKitSubtitleTranslator.containsJapaneseKana(segment.originalText)) {
+      return 'ja';
+    }
+    if (_sessionPreferredCjkLang != null &&
+        MlKitSubtitleTranslator.containsCjkIdeograph(segment.originalText)) {
+      return _sessionPreferredCjkLang!;
+    }
+    return 'auto';
   }
 
   @override
