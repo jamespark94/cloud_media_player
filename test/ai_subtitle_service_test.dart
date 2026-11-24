@@ -11,7 +11,9 @@ import 'package:cloud_media_player/services/ai_subtitle/engines/cloud_ai_subtitl
 import 'package:cloud_media_player/services/ai_subtitle/engines/free_hybrid_subtitle_engine.dart';
 import 'package:cloud_media_player/services/ai_subtitle/engines/on_device_subtitle_engine.dart';
 import 'package:cloud_media_player/services/ai_subtitle/extractors/audio_chunk_extractor.dart';
+import 'package:cloud_media_player/services/ai_subtitle/extractors/desktop_ffmpeg_extractor.dart';
 import 'package:cloud_media_player/services/ai_subtitle/extractors/ffmpeg_kit_chunk_runner.dart';
+import 'package:cloud_media_player/services/ai_subtitle/stt/whisper_chunk_runner.dart';
 import 'package:cloud_media_player/services/ai_subtitle/stt/whisper_isolate_worker.dart';
 import 'package:cloud_media_player/services/ai_subtitle/subtitle_generator_engine.dart';
 import 'package:cloud_media_player/services/ai_subtitle/subtitle_segment_cache.dart';
@@ -1124,9 +1126,14 @@ void main() {
     test('AiSubtitleConfig and WhisperModelTier defaults reflect online free recommended mode', () {
       const cfg = AiSubtitleConfig();
       expect(cfg.engineType, AiSubtitleEngineType.freeHybrid);
-      expect(cfg.modelTier, AiWhisperModelTier.base);
+      expect(cfg.modelTier, AiWhisperModelTier.small);
       expect(cfg.effectiveChunkSeconds, 45);
+      expect(AiSubtitleConfig.initialShortChunkSeconds, inInclusiveRange(10, 15));
+      expect(AiSubtitleConfig.streamingChunkSeconds, 30);
+      expect(AiSubtitleConfig.staleSkipLeadSeconds, inInclusiveRange(10, 30));
       expect(AiWhisperModelTier.fromCode('small'), AiWhisperModelTier.small);
+      expect(AiWhisperModelTier.fromCode('small-q5_1'), AiWhisperModelTier.smallQ5_1);
+      expect(AiWhisperModelTier.smallQ5_1.modelFileName, 'ggml-small-q5_1.bin');
       expect(
         AiWhisperModelTier.fromCode('large-v3-turbo'),
         AiWhisperModelTier.largeV3TurboQ5,
@@ -1363,4 +1370,580 @@ void main() {
       await engine.dispose();
     });
   });
+
+  group('Windows Desktop Audio Extraction & Whisper CLI/FFI Fallback Tests', () {
+    test('DesktopFfmpegExtractor reports unavailable safely when both ffmpeg.exe and libmpv are missing', () async {
+      final extractor = DesktopFfmpegExtractor(
+        ffmpegPathFinderOverride: () async => null,
+        mpvAvailableOverride: () => false,
+      );
+
+      expect(await extractor.isAvailable(), isFalse);
+      final reason = await extractor.getUnavailableReason();
+      expect(reason, isNotNull);
+
+      expect(
+        () => extractor.extractChunk(
+          streamUrl: 'file:///local/movie.mp4',
+          httpHeaders: const {},
+          start: Duration.zero,
+          duration: const Duration(seconds: 30),
+          outputWavPath: '${Directory.systemTemp.path}/nonexistent_test.wav',
+        ),
+        throwsA(isA<AudioExtractionException>()),
+      );
+      await extractor.dispose();
+    });
+
+    test('DesktopFfmpegExtractor becomes available when libmpv fallback is present without ffmpeg.exe', () async {
+      final extractor = DesktopFfmpegExtractor(
+        ffmpegPathFinderOverride: () async => null,
+        mpvAvailableOverride: () => true,
+      );
+
+      expect(await extractor.isAvailable(), Platform.isWindows);
+      await extractor.dispose();
+    });
+
+    test('WhisperIsolateWorker parses whisper-cli.exe JSON and stdout timestamp outputs accurately', () {
+      const cliJson = '''
+{
+  "result": { "language": "en" },
+  "transcription": [
+    {
+      "timestamps": { "from": "00:00:01,250", "to": "00:00:03,800" },
+      "offsets": { "from": 1250, "to": 3800 },
+      "text": " Hello from Windows."
+    },
+    {
+      "timestamps": { "from": "00:00:04,000", "to": "00:00:05,500" },
+      "text": " [BLANK_AUDIO] "
+    },
+    {
+      "timestamps": { "from": "00:00:06,100", "to": "00:00:08,900" },
+      "text": " How are you?"
+    }
+  ]
+}
+''';
+
+      final jsonSegments = WhisperIsolateWorker.parseWhisperCliJson(
+        jsonString: cliJson,
+        chunkOffset: const Duration(seconds: 45),
+        chunkDuration: const Duration(seconds: 45),
+        sourceLanguage: 'auto',
+      );
+
+      expect(jsonSegments.length, 2);
+      expect(jsonSegments[0].startTime, const Duration(seconds: 46, milliseconds: 250));
+      expect(jsonSegments[0].endTime, const Duration(seconds: 48, milliseconds: 800));
+      expect(jsonSegments[0].originalText, 'Hello from Windows.');
+      expect(jsonSegments[0].languageCode, 'en');
+      expect(jsonSegments[1].startTime, const Duration(seconds: 51, milliseconds: 100));
+      expect(jsonSegments[1].endTime, const Duration(seconds: 53, milliseconds: 900));
+      expect(jsonSegments[1].originalText, 'How are you?');
+
+      const cliStdout = '''
+[00:00:00.500 --> 00:00:02.400]   [Music]
+[00:00:02.500 --> 00:00:05.100]   Welcome to desktop mode.
+''';
+      final stdoutSegments = WhisperIsolateWorker.parseWhisperCliStdout(
+        stdoutText: cliStdout,
+        chunkOffset: const Duration(seconds: 90),
+        chunkDuration: const Duration(seconds: 45),
+        sourceLanguage: 'en',
+      );
+
+      expect(stdoutSegments.length, 1);
+      expect(stdoutSegments.first.startTime, const Duration(seconds: 92, milliseconds: 500));
+      expect(stdoutSegments.first.endTime, const Duration(seconds: 95, milliseconds: 100));
+      expect(stdoutSegments.first.originalText, 'Welcome to desktop mode.');
+      expect(stdoutSegments.first.languageCode, 'en');
+    });
+
+    test('AiSubtitleService safely disables FreeHybridSubtitleEngine and shows notice when Windows binaries are missing', () async {
+      final unavailableExtractor = DesktopFfmpegExtractor(
+        ffmpegPathFinderOverride: () async => null,
+        mpvAvailableOverride: () => false,
+      );
+      final unavailableWhisper = WhisperIsolateWorker(
+        windowsFfiPathFinderOverride: () => null,
+        windowsCliPathFinderOverride: () async => null,
+      );
+
+      final service = AiSubtitleService.forTesting(
+        translationSupportedOverride: false,
+        initialConfig: const AiSubtitleConfig(
+          engineType: AiSubtitleEngineType.freeHybrid,
+          modelTier: AiWhisperModelTier.base,
+        ),
+        freeHybridEngineFactory: (tier) => FreeHybridSubtitleEngine(
+          modelTier: tier,
+          extractor: unavailableExtractor,
+          whisperWorker: unavailableWhisper,
+        ),
+      );
+      service.setStreamContextForTesting(
+        mediaItemId: 'vid_missing_bin',
+        streamUrl: 'file:///local/movie.mp4',
+      );
+
+      String? notice;
+      var isWarn = false;
+      service.onNotification = (msg, {bool isWarning = false}) {
+        notice = msg;
+        isWarn = isWarning;
+      };
+
+      await service.setEnabled(true);
+      service.processPositionUpdate(const Duration(seconds: 1), isPlaying: true);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      expect(service.isEnabled, isFalse);
+      expect(isWarn, isTrue);
+      expect(notice, isNotNull);
+      expect(service.lastErrorMessage, isNotNull);
+      await service.unbindStreamContext();
+    });
+
+    test('AiSubtitleService resumes scheduling after epoch change during slow in-flight chunk and warns on slow Windows CPU model', () async {
+      final firstChunkGate = Completer<void>();
+      final requestedModelTiers = <AiWhisperModelTier>[];
+      final requestedStarts = <Duration>[];
+
+      final service = AiSubtitleService.forTesting(
+        translationSupportedOverride: false,
+        initialConfig: const AiSubtitleConfig(
+          engineType: AiSubtitleEngineType.freeHybrid,
+          modelTier: AiWhisperModelTier.largeV3TurboQ5,
+          chunkSeconds: 45,
+        ),
+        freeHybridEngineFactory: (tier) => _SlowDelayedFreeHybridEngine(
+          tier: tier,
+          onChunkRequested: (req) async {
+            requestedModelTiers.add(tier);
+            requestedStarts.add(req.chunkStart);
+            if (tier == AiWhisperModelTier.largeV3TurboQ5) {
+              await firstChunkGate.future;
+              return const [];
+            }
+            return [
+              SubtitleSegment(
+                startTime: req.chunkStart,
+                endTime: req.chunkStart + const Duration(seconds: 5),
+                originalText: 'Fast tiny line',
+                translatedText: '빠른 타이니 자막',
+              ),
+            ];
+          },
+        ),
+      );
+      service.isWindowsPlatformOverride = true;
+      service.setStreamContextForTesting(
+        mediaItemId: 'vid_slow_switch',
+        streamUrl: 'file:///local/movie.mp4',
+      );
+
+      await service.setEnabled(true);
+      service.processPositionUpdate(const Duration(seconds: 1), isPlaying: true);
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      expect(requestedModelTiers, [AiWhisperModelTier.largeV3TurboQ5]);
+      expect(service.isProcessingChunk, isTrue);
+      expect(service.statusMessage, contains('Large v3 Turbo Q5'));
+
+      // 사용자가 분석 대기 중 Tiny 모델로 전환해도 기존 작업 종료 후 새 모델 스케줄링이 재개되어야 함
+      await service.updateConfig(
+        service.config.copyWith(modelTier: AiWhisperModelTier.tiny),
+      );
+      firstChunkGate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(requestedModelTiers, contains(AiWhisperModelTier.tiny));
+      expect(service.maxConcurrentChunkWorkersObserved, 1);
+      service.processPositionUpdate(const Duration(seconds: 2), isPlaying: true);
+      expect(service.currentSegment?.translatedText, '빠른 타이니 자막');
+      await service.unbindStreamContext();
+    });
+
+    test('Adaptive pipeline uses 12s short initial chunk, 30s pre-extracted chunks, skips stale chunks, and jumps +15s ahead', () async {
+      final extractedRanges = <(Duration, Duration)>[];
+      final transcribedRanges = <(Duration, Duration)>[];
+      var simulatedPos = Duration.zero;
+
+      final extractor = _RecordingAudioExtractor(
+        onExtract: (start, duration) {
+          extractedRanges.add((start, duration));
+        },
+      );
+      final preExtractor = _RecordingAudioExtractor(
+        onExtract: (start, duration) {
+          extractedRanges.add((start, duration));
+        },
+      );
+      final whisperWorker = _RecordingWhisperWorker(
+        onTranscribe: (offset, duration) async {
+          transcribedRanges.add((offset, duration));
+          if (offset == Duration.zero) {
+            // 첫 12초 청크를 분석하는 동안 재생 위치가 50초로 크게 앞서갔다고 시뮬레이션
+            // (이미 선행 추출된 12~42초 청크는 종료 시간 42초 <= 50초이므로 Stale 폐기 대상)
+            simulatedPos = const Duration(seconds: 50);
+          }
+          return [
+            SubtitleSegment(
+              startTime: offset + const Duration(seconds: 1),
+              endTime: offset + const Duration(seconds: 4),
+              originalText: 'Line at ${offset.inSeconds}s',
+            ),
+          ];
+        },
+      );
+
+      final service = AiSubtitleService.forTesting(
+        translationSupportedOverride: false,
+        initialConfig: const AiSubtitleConfig(
+          engineType: AiSubtitleEngineType.freeHybrid,
+          modelTier: AiWhisperModelTier.small,
+        ),
+        freeHybridEngineFactory: (tier) => _TestReadyFreeHybridEngine(
+          modelTier: tier,
+          extractor: extractor,
+          preExtractor: preExtractor,
+          whisperWorker: whisperWorker,
+        ),
+      );
+      service.currentPositionOverride = () => simulatedPos;
+      service.setStreamContextForTesting(
+        mediaItemId: 'vid_stale_skip',
+        streamUrl: 'file:///local/movie.mp4',
+      );
+
+      await service.setEnabled(true);
+      service.processPositionUpdate(Duration.zero, isPlaying: true);
+      await Future<void>.delayed(const Duration(milliseconds: 120));
+
+      // 1. 첫 청크는 12초 단위로 추출·전사되고, 선행 청크(12~42s)는 30초 단위로 미리 추출됨
+      expect(extractedRanges.first, (Duration.zero, const Duration(seconds: 12)));
+      expect(
+        extractedRanges,
+        contains((const Duration(seconds: 12), const Duration(seconds: 30))),
+      );
+
+      // 2. 12~42초 청크는 재생 위치(50s >= 42s)가 이미 지나갔으므로 Whisper 실행 없이 Stale 폐기됨
+      expect(
+        transcribedRanges.any((r) => r.$1 == const Duration(seconds: 12)),
+        isFalse,
+      );
+      expect(service.skippedStaleChunkCount, greaterThanOrEqualTo(1));
+
+      // 3. Stale 폐기 후 현재 재생 위치(50s) 기준 +15초 앞선 미래 구간(65s~95s)을 새로 추출·전사함
+      expect(
+        transcribedRanges.any(
+          (r) =>
+              r.$1 == const Duration(seconds: 65) &&
+              r.$2 == const Duration(seconds: 30),
+        ),
+        isTrue,
+      );
+      expect(service.maxConcurrentChunkWorkersObserved, 1);
+      await service.unbindStreamContext();
+    });
+
+    test('Serial worker queue prevents overlapping Whisper runs across rapid position triggers', () async {
+      final firstGate = Completer<void>();
+      var activeWhisperCount = 0;
+      var maxWhisperConcurrent = 0;
+      var whisperCallCount = 0;
+
+      final service = AiSubtitleService.forTesting(
+        translationSupportedOverride: false,
+        initialConfig: const AiSubtitleConfig(
+          engineType: AiSubtitleEngineType.freeHybrid,
+          modelTier: AiWhisperModelTier.small,
+        ),
+        freeHybridEngineFactory: (tier) => _TestReadyFreeHybridEngine(
+          modelTier: tier,
+          extractor: _FakeAudioExtractor(),
+          preExtractor: _FakeAudioExtractor(),
+          whisperWorker: _RecordingWhisperWorker(
+            onTranscribe: (offset, duration) async {
+              activeWhisperCount++;
+              if (activeWhisperCount > maxWhisperConcurrent) {
+                maxWhisperConcurrent = activeWhisperCount;
+              }
+              whisperCallCount++;
+              if (whisperCallCount == 1) {
+                await firstGate.future;
+              }
+              activeWhisperCount--;
+              return [
+                SubtitleSegment(
+                  startTime: offset,
+                  endTime: offset + const Duration(seconds: 4),
+                  originalText: 'Serial line',
+                ),
+              ];
+            },
+          ),
+        ),
+      );
+      service.setStreamContextForTesting(
+        mediaItemId: 'vid_serial_mutex',
+        streamUrl: 'file:///local/movie.mp4',
+      );
+
+      await service.setEnabled(true);
+      for (var sec = 1; sec <= 5; sec++) {
+        service.processPositionUpdate(Duration(seconds: sec), isPlaying: true);
+      }
+      await Future<void>.delayed(const Duration(milliseconds: 40));
+
+      // 이전 Whisper가 완료되기 전에 중복 실행되지 않아야 함
+      expect(whisperCallCount, 1);
+      expect(maxWhisperConcurrent, 1);
+
+      firstGate.complete();
+      await Future<void>.delayed(const Duration(milliseconds: 80));
+
+      expect(maxWhisperConcurrent, 1);
+      expect(service.maxConcurrentChunkWorkersObserved, 1);
+      await service.unbindStreamContext();
+    });
+
+    test('extractAndTranscribeChunkWithWhisper discards stale WAV before running Whisper', () async {
+      var whisperCalled = false;
+      final worker = _RecordingWhisperWorker(
+        onTranscribe: (offset, duration) async {
+          whisperCalled = true;
+          return const [];
+        },
+      );
+      final tempWav = File(
+        '${Directory.systemTemp.path}/stale_pre_test_${DateTime.now().microsecondsSinceEpoch}.wav',
+      );
+      await tempWav.writeAsBytes(List<int>.filled(128, 1));
+
+      final segments = await extractAndTranscribeChunkWithWhisper(
+        extractor: _FakeAudioExtractor(),
+        whisperWorker: worker,
+        chunkSequence: 1,
+        isCancelled: () => false,
+        request: AudioChunkRequest(
+          mediaItemId: 'vid_pre_stale',
+          streamUrl: 'file:///local/movie.mp4',
+          httpHeaders: const {},
+          chunkStart: Duration.zero,
+          chunkDuration: const Duration(seconds: 30),
+          preExtractedWavPath: tempWav.path,
+          shouldSkipBeforeTranscribe: () => true,
+        ),
+      );
+
+      expect(segments, isEmpty);
+      expect(whisperCalled, isFalse);
+      expect(tempWav.existsSync(), isFalse);
+    });
+
+    test('WhisperIsolateWorker builds Vulkan GPU (-ngl 99) args and falls back to CPU (-ngl 0 -t 4) on GPU failure', () async {
+      final gpuArgs = WhisperIsolateWorker.buildWindowsCliArgs(
+        modelPath: 'ggml-small.bin',
+        wavPath: 'chunk.wav',
+        sourceLanguage: 'en',
+        outPrefix: 'chunk.wav.out',
+        useGpu: true,
+      );
+      expect(gpuArgs, containsAllInOrder(['-ngl', '99']));
+
+      final cpuArgs = WhisperIsolateWorker.buildWindowsCliArgs(
+        modelPath: 'ggml-small.bin',
+        wavPath: 'chunk.wav',
+        sourceLanguage: 'en',
+        outPrefix: 'chunk.wav.out',
+        useGpu: false,
+      );
+      expect(cpuArgs, containsAllInOrder(['-ngl', '0', '-t', '4']));
+
+      if (!Platform.isWindows) return;
+
+      final recordedCliArgs = <List<String>>[];
+      final worker = WhisperIsolateWorker(
+        windowsFfiPathFinderOverride: () => null,
+        windowsCliPathFinderOverride: () async => r'C:\tools\whisper-cli.exe',
+        vulkanAvailableOverride: true,
+        modelPathOverride: (tier) async => 'ggml-${tier.code}.bin',
+        windowsCliRunnerOverride: (cliPath, args) async {
+          recordedCliArgs.add(args);
+          if (args.contains('99')) {
+            return (
+              exitCode: 1,
+              stdout: '',
+              stderr: 'ggml_vulkan: Failed to initialize Vulkan device',
+            );
+          }
+          return (
+            exitCode: 0,
+            stdout: '[00:00:00.000 --> 00:00:02.000]  Fallback CPU success.',
+            stderr: '',
+          );
+        },
+      );
+
+      await worker.initialize(tier: AiWhisperModelTier.tiny);
+      final tmpWav = File(
+        '${Directory.systemTemp.path}/vulkan_fb_${DateTime.now().microsecondsSinceEpoch}.wav',
+      );
+      await tmpWav.writeAsBytes(List<int>.filled(64, 1));
+      try {
+        final segments = await worker.transcribeChunk(
+          wavPath: tmpWav.path,
+          chunkOffset: Duration.zero,
+          chunkDuration: const Duration(seconds: 12),
+          sourceLanguage: 'en',
+        );
+
+        expect(recordedCliArgs.length, 2);
+        expect(recordedCliArgs[0], containsAllInOrder(['-ngl', '99']));
+        expect(recordedCliArgs[1], containsAllInOrder(['-ngl', '0', '-t', '4']));
+        expect(worker.hasFallenBackToCpu, isTrue);
+        expect(segments.length, 1);
+        expect(segments.first.originalText, 'Fallback CPU success.');
+      } finally {
+        if (tmpWav.existsSync()) await tmpWav.delete();
+        await worker.release();
+      }
+    });
+  });
+}
+
+class _RecordingAudioExtractor implements AudioChunkExtractor {
+  final void Function(Duration start, Duration duration) onExtract;
+
+  _RecordingAudioExtractor({required this.onExtract});
+
+  @override
+  Future<bool> isAvailable() async => true;
+
+  @override
+  Future<File> extractChunk({
+    required String streamUrl,
+    required Map<String, String> httpHeaders,
+    required Duration start,
+    required Duration duration,
+    required String outputWavPath,
+    AudioChunkFormat format = AudioChunkFormat.wav16k,
+  }) async {
+    onExtract(start, duration);
+    final file = File(outputWavPath);
+    if (!file.parent.existsSync()) {
+      file.parent.createSync(recursive: true);
+    }
+    await file.writeAsBytes(List<int>.filled(64, 1));
+    return file;
+  }
+
+  @override
+  Future<void> cancel() async {}
+
+  @override
+  Future<void> dispose() async {}
+}
+
+class _RecordingWhisperWorker extends WhisperIsolateWorker {
+  final Future<List<SubtitleSegment>> Function(
+    Duration offset,
+    Duration duration,
+  ) onTranscribe;
+
+  _RecordingWhisperWorker({required this.onTranscribe});
+
+  @override
+  Future<bool> isAvailable() async => true;
+
+  @override
+  Future<void> initialize({
+    required AiWhisperModelTier tier,
+    void Function(double progress, String status)? onProgress,
+  }) async {}
+
+  @override
+  Future<List<SubtitleSegment>> transcribeChunk({
+    required String wavPath,
+    required Duration chunkOffset,
+    required Duration chunkDuration,
+    required String sourceLanguage,
+  }) {
+    return onTranscribe(chunkOffset, chunkDuration);
+  }
+
+  @override
+  Future<void> release() async {}
+}
+
+class _TestReadyFreeHybridEngine extends FreeHybridSubtitleEngine {
+  _TestReadyFreeHybridEngine({
+    required super.modelTier,
+    required AudioChunkExtractor extractor,
+    required AudioChunkExtractor preExtractor,
+    required WhisperIsolateWorker whisperWorker,
+  }) : super(
+          extractor: extractor,
+          preExtractor: preExtractor,
+          whisperWorker: whisperWorker,
+          batchTranslator: GoogleWebBatchTranslator(
+            dio: Dio()
+              ..httpClientAdapter = _MockHttpAdapter((options) async {
+                final body = jsonEncode([
+                  [
+                    ['테스트 번역', 'test', null, null, 1],
+                  ],
+                  null,
+                  'en',
+                ]);
+                return ResponseBody.fromString(
+                  body,
+                  200,
+                  headers: {
+                    Headers.contentTypeHeader: [Headers.jsonContentType],
+                  },
+                );
+              }),
+          ),
+        );
+
+  @override
+  Future<bool> isSupported() async => true;
+}
+
+class _SlowDelayedFreeHybridEngine extends FreeHybridSubtitleEngine {
+  final Future<List<SubtitleSegment>> Function(AudioChunkRequest req)
+      onChunkRequested;
+
+  _SlowDelayedFreeHybridEngine({
+    required AiWhisperModelTier tier,
+    required this.onChunkRequested,
+  }) : super(
+          modelTier: tier,
+          extractor: _FakeAudioExtractor(),
+          whisperWorker: _FakeWhisperWorker(const []),
+        );
+
+  @override
+  Future<bool> isSupported() async => true;
+
+  @override
+  Future<void> initialize({
+    void Function(double progress, String status)? onProgress,
+  }) async {
+    onProgress?.call(1.0, 'Ready');
+  }
+
+  @override
+  Stream<SubtitleSegment> generateSubtitlesForChunk(
+    AudioChunkRequest request,
+  ) async* {
+    final segments = await onChunkRequested(request);
+    for (final s in segments) {
+      yield s;
+    }
+  }
 }

@@ -1,7 +1,9 @@
 import 'dart:async';
+import 'dart:io';
 import '../../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../../models/ai_subtitle/subtitle_segment.dart';
 import '../extractors/audio_chunk_extractor.dart';
+import '../extractors/desktop_ffmpeg_extractor.dart';
 import '../stt/whisper_chunk_runner.dart';
 import '../stt/whisper_isolate_worker.dart';
 import '../subtitle_generator_engine.dart';
@@ -15,6 +17,7 @@ import '../translators/subtitle_translator.dart';
 /// 3. 플랫폼 분기 번역기 (Android/iPadOS: ML Kit 한국어 번역, Windows: 원어 단독 출력)
 class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
   final AudioChunkExtractor _extractor;
+  final AudioChunkExtractor _preExtractor;
   final WhisperIsolateWorker _whisperWorker;
   final SubtitleTranslator _translator;
   final AiWhisperModelTier modelTier;
@@ -26,9 +29,11 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
   OnDeviceSubtitleEngine({
     this.modelTier = AiWhisperModelTier.tiny,
     AudioChunkExtractor? extractor,
+    AudioChunkExtractor? preExtractor,
     WhisperIsolateWorker? whisperWorker,
     SubtitleTranslator? translator,
   })  : _extractor = extractor ?? AudioChunkExtractor.create(),
+        _preExtractor = preExtractor ?? extractor ?? AudioChunkExtractor.create(),
         _whisperWorker = whisperWorker ?? WhisperIsolateWorker(),
         _translator = translator ?? SubtitleTranslator.create();
 
@@ -50,6 +55,24 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
     final whisperOk = await _whisperWorker.isAvailable();
     final ffmpegOk = await _extractor.isAvailable();
     return whisperOk && ffmpegOk;
+  }
+
+  /// 현재 환경에서 엔진을 사용할 수 없는 구체적 사유를 반환합니다.
+  Future<String?> getUnsupportedReason() async {
+    final whisperReason = await _whisperWorker.getUnavailableReason();
+    String? extractorReason;
+    if (!await _extractor.isAvailable()) {
+      final extractor = _extractor;
+      if (extractor is DesktopFfmpegExtractor) {
+        extractorReason = await extractor.getUnavailableReason();
+      } else {
+        extractorReason = '오디오 청크 추출 모듈을 사용할 수 없습니다.';
+      }
+    }
+    if (whisperReason != null && extractorReason != null) {
+      return '$extractorReason $whisperReason';
+    }
+    return whisperReason ?? extractorReason;
   }
 
   @override
@@ -150,16 +173,38 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
     return 'auto';
   }
 
+  /// 다음 구간의 오디오 청크(16kHz Mono PCM WAV)를 백그라운드에서 미리 추출합니다.
+  Future<File> preExtractAudioChunk({
+    required String streamUrl,
+    required Map<String, String> httpHeaders,
+    required Duration start,
+    required Duration duration,
+    required String outputWavPath,
+  }) {
+    return _preExtractor.extractChunk(
+      streamUrl: streamUrl,
+      httpHeaders: httpHeaders,
+      start: start,
+      duration: duration,
+      outputWavPath: outputWavPath,
+    );
+  }
+
+  Future<void> cancelPreExtraction() => _preExtractor.cancel();
+
   @override
   Future<void> cancelCurrentJob() async {
     _isCancelled = true;
     await _extractor.cancel();
+    await _preExtractor.cancel();
+    await _whisperWorker.cancel();
   }
 
   @override
   Future<void> dispose() async {
     _isCancelled = true;
     await _extractor.dispose();
+    await _preExtractor.dispose();
     await _translator.dispose();
     await _whisperWorker.release();
   }

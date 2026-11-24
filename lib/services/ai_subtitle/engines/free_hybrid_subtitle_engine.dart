@@ -1,9 +1,11 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../../models/ai_subtitle/subtitle_segment.dart';
 import '../extractors/audio_chunk_extractor.dart';
+import '../extractors/desktop_ffmpeg_extractor.dart';
 import '../stt/whisper_chunk_runner.dart';
 import '../stt/whisper_isolate_worker.dart';
 import '../subtitle_generator_engine.dart';
@@ -46,6 +48,7 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
 
   final AiWhisperModelTier modelTier;
   final AudioChunkExtractor _extractor;
+  final AudioChunkExtractor _preExtractor;
   final WhisperIsolateWorker _whisperWorker;
   final GoogleWebBatchTranslator _batchTranslator;
 
@@ -55,11 +58,13 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
   String? _lastTranslationError;
 
   FreeHybridSubtitleEngine({
-    this.modelTier = AiWhisperModelTier.base,
+    this.modelTier = AiWhisperModelTier.small,
     AudioChunkExtractor? extractor,
+    AudioChunkExtractor? preExtractor,
     WhisperIsolateWorker? whisperWorker,
     GoogleWebBatchTranslator? batchTranslator,
   })  : _extractor = extractor ?? AudioChunkExtractor.create(),
+        _preExtractor = preExtractor ?? extractor ?? AudioChunkExtractor.create(),
         _whisperWorker = whisperWorker ?? WhisperIsolateWorker(),
         _batchTranslator = batchTranslator ?? GoogleWebBatchTranslator();
 
@@ -83,6 +88,24 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
     return whisperOk && ffmpegOk;
   }
 
+  /// 현재 환경에서 엔진을 사용할 수 없는 구체적 사유를 반환합니다.
+  Future<String?> getUnsupportedReason() async {
+    final whisperReason = await _whisperWorker.getUnavailableReason();
+    final extractor = _extractor;
+    String? extractorReason;
+    if (!await extractor.isAvailable()) {
+      if (extractor is DesktopFfmpegExtractor) {
+        extractorReason = await extractor.getUnavailableReason();
+      } else {
+        extractorReason = '오디오 청크 추출 모듈을 사용할 수 없습니다.';
+      }
+    }
+    if (whisperReason != null && extractorReason != null) {
+      return '$extractorReason $whisperReason';
+    }
+    return whisperReason ?? extractorReason;
+  }
+
   @override
   Future<void> initialize({
     void Function(double progress, String status)? onProgress,
@@ -93,6 +116,25 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
       onProgress: onProgress,
     );
   }
+
+  /// 다음 구간의 오디오 청크(16kHz Mono PCM WAV)를 백그라운드에서 미리 추출합니다.
+  Future<File> preExtractAudioChunk({
+    required String streamUrl,
+    required Map<String, String> httpHeaders,
+    required Duration start,
+    required Duration duration,
+    required String outputWavPath,
+  }) {
+    return _preExtractor.extractChunk(
+      streamUrl: streamUrl,
+      httpHeaders: httpHeaders,
+      start: start,
+      duration: duration,
+      outputWavPath: outputWavPath,
+    );
+  }
+
+  Future<void> cancelPreExtraction() => _preExtractor.cancel();
 
   @override
   Stream<SubtitleSegment> generateSubtitlesForChunk(
@@ -519,6 +561,8 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
       _activeCancelToken?.cancel('Cancelled by user/seek');
     } catch (_) {}
     await _extractor.cancel();
+    await _preExtractor.cancel();
+    await _whisperWorker.cancel();
   }
 
   @override
@@ -528,6 +572,7 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
       _activeCancelToken?.cancel('Engine disposed');
     } catch (_) {}
     await _extractor.dispose();
+    await _preExtractor.dispose();
     _batchTranslator.dispose();
     await _whisperWorker.release();
   }

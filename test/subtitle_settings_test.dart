@@ -17,7 +17,7 @@ void main() {
       expect(settings.backgroundColor, Colors.black);
       expect(settings.backgroundOpacity, 0.5);
       expect(settings.aiEngineType, AiSubtitleEngineType.freeHybrid);
-      expect(settings.aiWhisperModelTier, AiWhisperModelTier.base);
+      expect(settings.aiWhisperModelTier, AiWhisperModelTier.small);
       expect(settings.aiDisplayMode, AiSubtitleDisplayMode.dual);
       expect(settings.aiSourceLanguage, 'auto');
     });

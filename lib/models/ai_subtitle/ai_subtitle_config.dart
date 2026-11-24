@@ -38,12 +38,19 @@ enum AiSubtitleDisplayMode {
 
 /// 로컬 Whisper.cpp 모델 크기 티어.
 enum AiWhisperModelTier {
-  tiny('tiny', 'Tiny (~75MB, 가장 빠름)', 'ggml-tiny.bin', 'Tiny (~75MB)', '~75MB'),
-  base('base', 'Base (~142MB, 균형 · 기본)', 'ggml-base.bin', 'Base (~142MB)', '~142MB'),
-  small('small', 'Small (~466MB, 높은 인식률)', 'ggml-small.bin', 'Small (~466MB)', '~466MB'),
+  tiny('tiny', 'Tiny (~75MB, 가장 빠름 · 저사양 CPU용)', 'ggml-tiny.bin', 'Tiny (~75MB)', '~75MB'),
+  base('base', 'Base (~142MB, 빠름)', 'ggml-base.bin', 'Base (~142MB)', '~142MB'),
+  smallQ5_1(
+    'small-q5_1',
+    'Small Q5_1 (~190MB, 빠른 고효율 · 실시간 추천)',
+    'ggml-small-q5_1.bin',
+    'Small Q5_1',
+    '~190MB',
+  ),
+  small('small', 'Small (~466MB, 실시간 기본 추천 · 균형)', 'ggml-small.bin', 'Small (~466MB)', '~466MB'),
   largeV3TurboQ5(
     'large-v3-turbo-q5_0',
-    'Large v3 Turbo Q5 (~547MB, 최고 인식률)',
+    'Large v3 Turbo Q5 (~547MB, 최고 인식률 · 고성능 GPU 권장)',
     'ggml-large-v3-turbo-q5_0.bin',
     'Large v3 Turbo Q5',
     '~547MB',
@@ -70,7 +77,7 @@ enum AiWhisperModelTier {
     if (code == 'large-v3-turbo') {
       return AiWhisperModelTier.largeV3TurboQ5;
     }
-    return AiWhisperModelTier.base;
+    return AiWhisperModelTier.small;
   }
 }
 
@@ -106,6 +113,15 @@ class AiSubtitleConfig {
   static const int defaultFreeHybridChunkSeconds = 45;
   static const int defaultCloudChunkSeconds = 45;
 
+  /// 첫 자막 대기 시간 단축을 위한 초기 짧은 청크 길이(10~15초).
+  static const int initialShortChunkSeconds = 12;
+
+  /// 선행 버퍼링용 후속 스트리밍 청크 길이(30초).
+  static const int streamingChunkSeconds = 30;
+
+  /// 지나간 Stale 청크 폐기 후 새로 추출할 미래 구간 선행 오프셋(10~30초).
+  static const int staleSkipLeadSeconds = 15;
+
   final AiSubtitleEngineType engineType;
   final AiWhisperModelTier modelTier;
   final String sourceLanguage;
@@ -117,7 +133,7 @@ class AiSubtitleConfig {
 
   const AiSubtitleConfig({
     this.engineType = AiSubtitleEngineType.freeHybrid,
-    this.modelTier = AiWhisperModelTier.base,
+    this.modelTier = AiWhisperModelTier.small,
     this.sourceLanguage = 'auto',
     this.targetLanguage = 'ko',
     this.chunkSeconds = defaultFreeHybridChunkSeconds,

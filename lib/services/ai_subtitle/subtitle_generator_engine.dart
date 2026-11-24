@@ -10,6 +10,12 @@ class AudioChunkRequest {
   final String sourceLanguage;
   final String targetLanguage;
 
+  /// 백그라운드 선행 추출이 완료된 로컬 WAV 파일 경로(있으면 재추출 생략).
+  final String? preExtractedWavPath;
+
+  /// Whisper STT 실행 직전 Stale 여부(현재 재생 시간 >= 청크 종료 시간)를 확인하는 콜백.
+  final bool Function()? shouldSkipBeforeTranscribe;
+
   const AudioChunkRequest({
     required this.mediaItemId,
     required this.streamUrl,
@@ -18,6 +24,8 @@ class AudioChunkRequest {
     required this.chunkDuration,
     this.sourceLanguage = 'auto',
     this.targetLanguage = 'ko',
+    this.preExtractedWavPath,
+    this.shouldSkipBeforeTranscribe,
   });
 }
 

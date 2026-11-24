@@ -62,7 +62,7 @@ class SubtitleSettings {
     this.backgroundColor = Colors.black,
     this.backgroundOpacity = 0.5,
     this.aiEngineType = AiSubtitleEngineType.freeHybrid,
-    this.aiWhisperModelTier = AiWhisperModelTier.base,
+    this.aiWhisperModelTier = AiWhisperModelTier.small,
     this.aiDisplayMode = AiSubtitleDisplayMode.dual,
     this.aiSourceLanguage = 'auto',
   });

@@ -5,13 +5,11 @@ import 'package:ffmpeg_kit_flutter_new_min/ffmpeg_session.dart';
 import 'package:ffmpeg_kit_flutter_new_min/return_code.dart';
 import 'package:flutter/foundation.dart';
 import 'audio_chunk_extractor.dart';
-import 'local_http_audio_relay.dart';
+import 'ffmpeg_extract_helpers.dart';
 
-/// FFmpegKit 기반 공통 오디오 청크 추출 헬퍼.
-/// MobileFfmpegExtractor와 DesktopFfmpegExtractor가 공통으로 사용합니다.
+/// FFmpegKit 기반 모바일(Android / iPadOS) 전용 오디오 청크 추출 실행기.
 class FfmpegKitChunkRunner {
   static Future<void> _serialLock = Future<void>.value();
-  static final Set<String> _hlsAllowAllStreamUrls = <String>{};
 
   int? _activeSessionId;
   Completer<ReturnCode?>? _activeCompleter;
@@ -23,19 +21,14 @@ class FfmpegKitChunkRunner {
     _isCancelled = false;
   }
 
-  static bool shouldUseHlsAllowAll(String streamUrl) {
-    final lower = streamUrl.toLowerCase();
-    return lower.contains('.m3u8') || _hlsAllowAllStreamUrls.contains(streamUrl);
-  }
+  static bool shouldUseHlsAllowAll(String streamUrl) =>
+      FfmpegExtractHelpers.shouldUseHlsAllowAll(streamUrl);
 
-  static void markStreamRequiresHlsAllowAll(String streamUrl) {
-    _hlsAllowAllStreamUrls.add(streamUrl);
-  }
+  static void markStreamRequiresHlsAllowAll(String streamUrl) =>
+      FfmpegExtractHelpers.markStreamRequiresHlsAllowAll(streamUrl);
 
-  static bool isHlsExtensionRestrictionLog(String logs) {
-    return logs.contains('allowed_segment_extensions') ||
-        logs.contains('extension_picky');
-  }
+  static bool isHlsExtensionRestrictionLog(String logs) =>
+      FfmpegExtractHelpers.isHlsExtensionRestrictionLog(logs);
 
   static List<String> buildExtractArgs({
     required String inputTarget,
@@ -45,89 +38,26 @@ class FfmpegKitChunkRunner {
     required String outputWavPath,
     AudioChunkFormat format = AudioChunkFormat.wav16k,
     bool allowAllHlsExtensions = false,
-  }) {
-    final startSec = (start.inMilliseconds / 1000.0).toStringAsFixed(3);
-    final durSec = (duration.inMilliseconds / 1000.0).toStringAsFixed(3);
+  }) =>
+      FfmpegExtractHelpers.buildExtractArgs(
+        inputTarget: inputTarget,
+        isRemoteHttp: isRemoteHttp,
+        start: start,
+        duration: duration,
+        outputWavPath: outputWavPath,
+        format: format,
+        allowAllHlsExtensions: allowAllHlsExtensions,
+      );
 
-    final codecArgs = switch (format) {
-      AudioChunkFormat.wav16k => <String>[
-          '-c:a',
-          'pcm_s16le',
-          '-f',
-          'wav',
-        ],
-      AudioChunkFormat.mp3LowBitrate => <String>[
-          '-c:a',
-          'libmp3lame',
-          '-b:a',
-          '32k',
-          '-f',
-          'mp3',
-        ],
-      AudioChunkFormat.aacLowBitrate => <String>[
-          '-c:a',
-          'aac',
-          '-b:a',
-          '32k',
-          '-f',
-          'adts',
-        ],
-    };
-
-    return <String>[
-      '-nostdin',
-      '-y',
-      '-loglevel',
-      'error',
-      if (isRemoteHttp) ...['-rw_timeout', '15000000'],
-      if (allowAllHlsExtensions) ...[
-        '-f',
-        'hls',
-        '-allowed_segment_extensions',
-        'ALL',
-      ],
-      '-ss',
-      startSec,
-      '-t',
-      durSec,
-      '-i',
-      inputTarget,
-      '-vn',
-      '-sn',
-      '-dn',
-      '-ac',
-      '1',
-      '-ar',
-      '16000',
-      ...codecArgs,
-      outputWavPath,
-    ];
-  }
-
-  /// 원격 HTTPS/HTTP 스트림이면 Loopback Relay를 통해 FFmpeg 입력 주소를 준비합니다.
   static Future<({String inputTarget, String? relayUrl, bool isRemoteHttp})>
       prepareInputTarget({
     required String streamUrl,
     required Map<String, String> httpHeaders,
-  }) async {
-    final isLoopback = streamUrl.startsWith('http://127.0.0.1') ||
-        streamUrl.startsWith('http://localhost');
-    final isRemoteHttp =
-        streamUrl.startsWith('https://') || streamUrl.startsWith('http://');
-
-    if (isRemoteHttp && !isLoopback) {
-      final relayUrl = await LocalHttpAudioRelay.instance.register(
-        url: streamUrl,
-        headers: httpHeaders,
+  }) =>
+      FfmpegExtractHelpers.prepareInputTarget(
+        streamUrl: streamUrl,
+        httpHeaders: httpHeaders,
       );
-      return (inputTarget: relayUrl, relayUrl: relayUrl, isRemoteHttp: true);
-    }
-    return (
-      inputTarget: streamUrl,
-      relayUrl: null,
-      isRemoteHttp: isRemoteHttp,
-    );
-  }
 
   Future<File> runFfmpegKit({
     required List<String> args,

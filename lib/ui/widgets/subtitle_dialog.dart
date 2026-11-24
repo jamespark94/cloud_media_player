@@ -1,6 +1,6 @@
 import 'dart:convert';
-import 'dart:typed_data';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:media_kit/media_kit.dart';
 import '../../models/ai_subtitle/ai_subtitle_config.dart';
@@ -584,33 +584,37 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                   ),
                 ],
               ],
-              if (_aiInlineFeedback != null) ...[
+              if (_aiInlineFeedback != null ||
+                  (!isOn && ai.lastErrorMessage != null)) ...[
                 const SizedBox(height: 6),
-                Container(
-                  width: double.infinity,
-                  padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-                  decoration: BoxDecoration(
-                    color: (_aiInlineFeedbackIsWarning
-                            ? Colors.orangeAccent
-                            : Colors.cyanAccent)
-                        .withValues(alpha: 0.14),
-                    borderRadius: BorderRadius.circular(8),
-                    border: Border.all(
-                      color: (_aiInlineFeedbackIsWarning
-                              ? Colors.orangeAccent
-                              : Colors.cyanAccent)
-                          .withValues(alpha: 0.45),
-                    ),
-                  ),
-                  child: Text(
-                    _aiInlineFeedback!,
-                    style: TextStyle(
-                      color: _aiInlineFeedbackIsWarning
-                          ? Colors.orangeAccent
-                          : Colors.cyanAccent,
-                      fontSize: 11,
-                    ),
-                  ),
+                Builder(
+                  builder: (context) {
+                    final isWarning =
+                        _aiInlineFeedback == null || _aiInlineFeedbackIsWarning;
+                    final accent =
+                        isWarning ? Colors.orangeAccent : Colors.cyanAccent;
+                    return Container(
+                      width: double.infinity,
+                      padding: const EdgeInsets.symmetric(
+                        horizontal: 10,
+                        vertical: 6,
+                      ),
+                      decoration: BoxDecoration(
+                        color: accent.withValues(alpha: 0.14),
+                        borderRadius: BorderRadius.circular(8),
+                        border: Border.all(
+                          color: accent.withValues(alpha: 0.45),
+                        ),
+                      ),
+                      child: Text(
+                        _aiInlineFeedback ?? ai.lastErrorMessage!,
+                        style: TextStyle(
+                          color: accent,
+                          fontSize: 11,
+                        ),
+                      ),
+                    );
+                  },
                 ),
               ],
               const Divider(color: Colors.white12, height: 16),
@@ -860,6 +864,95 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                               onPressed: () => _downloadWhisperModel(selectedTier),
                             ),
                           ],
+                        ),
+                      ],
+                      const SizedBox(height: 6),
+                      const Text(
+                        '실시간 기본 추천: Small / Small Q5_1 (속도·정확도 균형 · Windows Vulkan GPU 가속 지원)',
+                        style: TextStyle(color: Colors.tealAccent, fontSize: 10.5),
+                      ),
+                      if (defaultTargetPlatform == TargetPlatform.windows &&
+                          selectedTier == AiWhisperModelTier.largeV3TurboQ5) ...[
+                        const SizedBox(height: 8),
+                        Container(
+                          width: double.infinity,
+                          padding: const EdgeInsets.symmetric(
+                            horizontal: 9,
+                            vertical: 7,
+                          ),
+                          decoration: BoxDecoration(
+                            color: Colors.amber.withValues(alpha: 0.12),
+                            borderRadius: BorderRadius.circular(6),
+                            border: Border.all(
+                              color: Colors.amber.withValues(alpha: 0.45),
+                            ),
+                          ),
+                          child: Row(
+                            children: [
+                              const Icon(
+                                Icons.speed,
+                                size: 15,
+                                color: Colors.amber,
+                              ),
+                              const SizedBox(width: 7),
+                              const Expanded(
+                                child: Text(
+                                  'Large v3 Turbo Q5 모델은 무거워 고성능 GPU가 아니면 실시간 자막이 지연될 수 있습니다. 실시간 추천 모델(Small / Small Q5_1) 사용을 권장합니다.',
+                                  style: TextStyle(
+                                    color: Colors.amberAccent,
+                                    fontSize: 10.5,
+                                  ),
+                                ),
+                              ),
+                              const SizedBox(width: 6),
+                              TextButton(
+                                style: TextButton.styleFrom(
+                                  foregroundColor: Colors.cyanAccent,
+                                  padding: const EdgeInsets.symmetric(
+                                    horizontal: 8,
+                                    vertical: 4,
+                                  ),
+                                  minimumSize: Size.zero,
+                                  tapTargetSize:
+                                      MaterialTapTargetSize.shrinkWrap,
+                                ),
+                                onPressed: () async {
+                                  final recommended =
+                                      _downloadedWhisperModels[
+                                                  AiWhisperModelTier.smallQ5_1] ==
+                                              true &&
+                                          _downloadedWhisperModels[
+                                                  AiWhisperModelTier.small] !=
+                                              true
+                                          ? AiWhisperModelTier.smallQ5_1
+                                          : AiWhisperModelTier.small;
+                                  await SubtitleSettingsService.instance
+                                      .updateSettings(
+                                    settings.copyWith(
+                                      aiWhisperModelTier: recommended,
+                                    ),
+                                  );
+                                  await ai.updateConfig(
+                                    ai.config.copyWith(modelTier: recommended),
+                                  );
+                                },
+                                child: Text(
+                                  _downloadedWhisperModels[
+                                              AiWhisperModelTier.smallQ5_1] ==
+                                          true &&
+                                      _downloadedWhisperModels[
+                                              AiWhisperModelTier.small] !=
+                                          true
+                                      ? 'Small Q5_1 전환'
+                                      : 'Small 전환',
+                                  style: const TextStyle(
+                                    fontSize: 11,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                              ),
+                            ],
+                          ),
                         ),
                       ],
                     ],

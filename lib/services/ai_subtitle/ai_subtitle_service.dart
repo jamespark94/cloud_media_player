@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:media_kit/media_kit.dart';
 import '../../models/ai_subtitle/ai_subtitle_config.dart';
@@ -90,6 +91,7 @@ class AiSubtitleService extends ChangeNotifier {
   bool _isProcessingChunk = false;
   double? _initProgress;
   String? _statusMessage;
+  String? _lastErrorMessage;
   AiSubtitleConfig _config;
 
   // Read-only 플레이어 스트림 바인딩 컨텍스트
@@ -109,9 +111,40 @@ class AiSubtitleService extends ChangeNotifier {
   int _consecutiveTranslationErrors = 0;
   bool _hasNotifiedPlatformMode = false;
   bool _hasNotifiedTranslationError = false;
+  bool _hasNotifiedSlowCpuModel = false;
   bool _isSchedulerRunning = false;
+  int _runningSchedulerEpoch = -1;
+  int? _queuedSchedulerEpoch;
+  Future<void> _serialWorkerChain = Future<void>.value();
   int _jobEpoch = 0;
   Timer? _seekDebounceTimer;
+  Timer? _chunkProgressTimer;
+
+  // 적응형 실시간 스트리밍 상태 (초기 12초 청크 + 선행 30초 추출 + Stale 폐기)
+  Duration? _adaptiveCursor;
+  bool _isFirstAdaptiveChunk = true;
+  _PreExtractedChunk? _pendingPreExtracted;
+  int _preExtractSeq = 0;
+
+  /// 테스트용 Windows CPU 경고 판정 오버라이드.
+  @visibleForTesting
+  bool? isWindowsPlatformOverride;
+
+  /// 테스트용 적응형 실시간 파이프라인(12초 초기 + 30초 선행 + Stale 스킵) 강제 오버라이드.
+  @visibleForTesting
+  bool? useAdaptiveStreamingOverride;
+
+  /// 테스트/진단용 현재 재생 위치 오버라이드.
+  @visibleForTesting
+  Duration Function()? currentPositionOverride;
+
+  /// 테스트용: Stale로 폐기된 청크 수 및 직렬 워커 동시 실행 감지용 카운터.
+  @visibleForTesting
+  int skippedStaleChunkCount = 0;
+
+  @visibleForTesting
+  int maxConcurrentChunkWorkersObserved = 0;
+  int _activeChunkWorkers = 0;
 
   static const int _maxConsecutiveErrors = 3;
 
@@ -126,6 +159,7 @@ class AiSubtitleService extends ChangeNotifier {
   bool get isProcessingChunk => _isProcessingChunk;
   double? get initProgress => _initProgress;
   String? get statusMessage => _statusMessage;
+  String? get lastErrorMessage => _lastErrorMessage;
   AiSubtitleConfig get config => _config;
   SubtitleSegment? get currentSegment => _currentSegment;
   SubtitleSegmentCache get cache => _cache;
@@ -199,6 +233,8 @@ class AiSubtitleService extends ChangeNotifier {
     _consecutiveTranslationErrors = 0;
     _hasNotifiedPlatformMode = false;
     _hasNotifiedTranslationError = false;
+    _hasNotifiedSlowCpuModel = false;
+    _resetAdaptivePipelineState();
 
     if (initialConfig != null) {
       _config = initialConfig;
@@ -240,6 +276,9 @@ class AiSubtitleService extends ChangeNotifier {
     _jobEpoch++;
     _seekDebounceTimer?.cancel();
     _seekDebounceTimer = null;
+    _chunkProgressTimer?.cancel();
+    _chunkProgressTimer = null;
+    _resetAdaptivePipelineState();
     _isEnabled = false;
     await _detachPlayerListeners();
     await _cache.persistToDisk();
@@ -268,6 +307,9 @@ class AiSubtitleService extends ChangeNotifier {
       _jobEpoch++;
       _seekDebounceTimer?.cancel();
       _seekDebounceTimer = null;
+      _chunkProgressTimer?.cancel();
+      _chunkProgressTimer = null;
+      _resetAdaptivePipelineState();
       await _detachPlayerListeners();
       await _cache.persistToDisk();
       _currentSegment = null;
@@ -285,6 +327,9 @@ class AiSubtitleService extends ChangeNotifier {
     _consecutiveTranslationErrors = 0;
     _hasNotifiedPlatformMode = false;
     _hasNotifiedTranslationError = false;
+    _hasNotifiedSlowCpuModel = false;
+    _resetAdaptivePipelineState();
+    _lastErrorMessage = null;
     await _keyStorage.loadApiKey();
     notifyListeners();
 
@@ -316,6 +361,8 @@ class AiSubtitleService extends ChangeNotifier {
       _consecutiveTranslationErrors = 0;
       _hasNotifiedPlatformMode = false;
       _hasNotifiedTranslationError = false;
+      _hasNotifiedSlowCpuModel = false;
+      _resetAdaptivePipelineState();
       await _cache.persistToDisk();
 
       _recreateCacheIfBucketSizeChanged();
@@ -342,6 +389,8 @@ class AiSubtitleService extends ChangeNotifier {
 
       if (_isEnabled && _boundPlayer != null) {
         _evaluatePosition(_boundPlayer!.state.position);
+      } else if (_isEnabled && _streamUrl != null) {
+        _scheduleWindowIfNeeded(_currentPlaybackPosition());
       }
     }
     notifyListeners();
@@ -474,8 +523,10 @@ class AiSubtitleService extends ChangeNotifier {
     if (jumpedBySeek) {
       _lastBucketIndex = nextBucket;
       // 진행 중인 다른 구간의 비동기 요청/추출 취소 후 1.8초 디바운싱 적용
-      if (_cache.getState(nextBucket) != ChunkProcessState.completed) {
+      if (_usesAdaptiveWhisperPipeline ||
+          _cache.getState(nextBucket) != ChunkProcessState.completed) {
         _jobEpoch++;
+        _resetAdaptivePipelineState();
         unawaited(_engine?.cancelCurrentJob());
       }
       _seekDebounceTimer?.cancel();
@@ -504,19 +555,78 @@ class AiSubtitleService extends ChangeNotifier {
     }
   }
 
+  bool get _usesAdaptiveWhisperPipeline {
+    if (useAdaptiveStreamingOverride != null) {
+      return useAdaptiveStreamingOverride!;
+    }
+    final isLocalWhisperEngine =
+        _config.engineType == AiSubtitleEngineType.freeHybrid ||
+            _config.engineType == AiSubtitleEngineType.onDevice;
+    return isLocalWhisperEngine && _injectedEngine == null;
+  }
+
+  Duration _currentPlaybackPosition() {
+    if (currentPositionOverride != null) {
+      return currentPositionOverride!();
+    }
+    return _boundPlayer?.state.position ?? _lastPosition;
+  }
+
+  bool _isChunkStale(Duration chunkStart, Duration chunkDuration) {
+    final curPos = _currentPlaybackPosition();
+    return curPos >= chunkStart + chunkDuration;
+  }
+
+  Duration _futureLeadStart(Duration curPos) {
+    final lead =
+        curPos + const Duration(seconds: AiSubtitleConfig.staleSkipLeadSeconds);
+    return Duration(seconds: lead.inSeconds);
+  }
+
+  void _resetAdaptivePipelineState() {
+    _adaptiveCursor = null;
+    _isFirstAdaptiveChunk = true;
+    final pending = _pendingPreExtracted;
+    _pendingPreExtracted = null;
+    if (pending != null) {
+      pending.cancelled = true;
+      unawaited(pending.disposeTempFile());
+    }
+  }
+
   void _scheduleWindowIfNeeded(Duration position) {
-    if (!_isEnabled || _isSchedulerRunning) return;
+    if (!_isEnabled) return;
     if (_streamUrl == null || _mediaItemId == null) return;
     if (!_isPlayerCurrentlyPlaying() || _isPlayerCurrentlyBuffering()) return;
     if (_seekDebounceTimer?.isActive == true) return;
 
-    unawaited(_runSchedulerLoop(position));
+    // 단일 워커 큐(Serial Queue): 현재 epoch 워커가 실행 중이거나 이미 대기 중이면 중복 실행 차단
+    if (_isSchedulerRunning && _runningSchedulerEpoch == _jobEpoch) {
+      return;
+    }
+    if (_queuedSchedulerEpoch == _jobEpoch) {
+      return;
+    }
+
+    final scheduledEpoch = _jobEpoch;
+    _queuedSchedulerEpoch = scheduledEpoch;
+    _serialWorkerChain = _serialWorkerChain.then((_) async {
+      if (_queuedSchedulerEpoch == scheduledEpoch) {
+        _queuedSchedulerEpoch = null;
+      }
+      if (!_isEnabled || scheduledEpoch != _jobEpoch) return;
+      if (_streamUrl == null || _mediaItemId == null) return;
+      if (!_isPlayerCurrentlyPlaying() || _isPlayerCurrentlyBuffering()) return;
+      if (_seekDebounceTimer?.isActive == true) return;
+      await _runSchedulerLoop(_lastPosition);
+    });
   }
 
   Future<void> _runSchedulerLoop(Duration initialPosition) async {
     if (_isSchedulerRunning) return;
-    _isSchedulerRunning = true;
     final epoch = _jobEpoch;
+    _isSchedulerRunning = true;
+    _runningSchedulerEpoch = epoch;
 
     try {
       final engineOk = await _ensureEngineReady();
@@ -533,9 +643,14 @@ class AiSubtitleService extends ChangeNotifier {
         }
       }
 
+      if (_usesAdaptiveWhisperPipeline) {
+        await _runAdaptiveWhisperLoop(epoch);
+        return;
+      }
+
       final lookahead = _config.effectiveLookaheadChunks;
 
-      // 현재 위치 버킷부터 lookahead 개수만큼 순차 처리
+      // 클라우드 API 또는 테스트용 주입 엔진: 기존 버킷 단위 순차 처리
       while (_isEnabled && epoch == _jobEpoch) {
         if (_engine == null || !_isEngineInitialized) break;
         if (!_isPlayerCurrentlyPlaying() || _isPlayerCurrentlyBuffering()) {
@@ -543,13 +658,12 @@ class AiSubtitleService extends ChangeNotifier {
         }
         if (_seekDebounceTimer?.isActive == true) break;
 
-        final curPos = _boundPlayer?.state.position ?? _lastPosition;
+        final curPos = _currentPlaybackPosition();
         final baseBucket = _cache.bucketIndexFor(curPos);
 
         int? targetBucket;
         for (var offset = 0; offset <= lookahead; offset++) {
           final candidate = baseBucket + offset;
-          // Chunk Key 및 처리 상태 중복 체크
           if (_cache.isChunkProcessedOrActive(candidate)) {
             continue;
           }
@@ -569,7 +683,268 @@ class AiSubtitleService extends ChangeNotifier {
       debugPrint('[AiSubtitleService] 스케줄러 예외 격리: $e');
     } finally {
       _isSchedulerRunning = false;
+      _runningSchedulerEpoch = -1;
     }
+  }
+
+  Future<void> _runAdaptiveWhisperLoop(int epoch) async {
+    while (_isEnabled && epoch == _jobEpoch) {
+      final engine = _engine;
+      final url = _streamUrl;
+      final itemId = _mediaItemId;
+      if (engine == null ||
+          !_isEngineInitialized ||
+          url == null ||
+          itemId == null) {
+        break;
+      }
+      if (!_isPlayerCurrentlyPlaying() || _isPlayerCurrentlyBuffering()) {
+        break;
+      }
+      if (_seekDebounceTimer?.isActive == true) break;
+
+      Duration chunkStart;
+      Duration chunkDuration;
+      String? preWavPath;
+
+      final pending = _pendingPreExtracted;
+      _pendingPreExtracted = null;
+
+      if (pending != null) {
+        final preFile = await pending.future;
+        if (!_isEnabled || epoch != _jobEpoch || pending.cancelled) {
+          await pending.disposeTempFile();
+          break;
+        }
+        // 큐에서 꺼낸 청크가 이미 지나간 구간이면 Whisper 실행 없이 즉시 폐기
+        if (_isChunkStale(pending.start, pending.duration)) {
+          skippedStaleChunkCount++;
+          debugPrint(
+            '[AiSubtitleService] 선행 청크 Stale 폐기 (${pending.start.inSeconds}s~${(pending.start + pending.duration).inSeconds}s) -> +${AiSubtitleConfig.staleSkipLeadSeconds}s 미래 구간 점프',
+          );
+          await pending.disposeTempFile();
+          _adaptiveCursor = _futureLeadStart(_currentPlaybackPosition());
+          _isFirstAdaptiveChunk = false;
+          continue;
+        }
+        chunkStart = pending.start;
+        chunkDuration = pending.duration;
+        if (preFile != null &&
+            preFile.existsSync() &&
+            preFile.lengthSync() > 44) {
+          preWavPath = preFile.path;
+        }
+      } else {
+        final curPos = _currentPlaybackPosition();
+        if (_adaptiveCursor != null) {
+          chunkStart = _adaptiveCursor!;
+        } else {
+          chunkStart = curPos <= const Duration(seconds: 3)
+              ? Duration.zero
+              : Duration(seconds: curPos.inSeconds);
+        }
+        chunkDuration = Duration(
+          seconds: _isFirstAdaptiveChunk
+              ? AiSubtitleConfig.initialShortChunkSeconds
+              : AiSubtitleConfig.streamingChunkSeconds,
+        );
+
+        if (_isChunkStale(chunkStart, chunkDuration)) {
+          skippedStaleChunkCount++;
+          chunkStart = _futureLeadStart(curPos);
+          chunkDuration = const Duration(
+            seconds: AiSubtitleConfig.streamingChunkSeconds,
+          );
+          _isFirstAdaptiveChunk = false;
+        }
+
+        // 재생 위치보다 45초 이상 앞서 있으면 과도한 선행 추출 중단
+        if (!_isFirstAdaptiveChunk &&
+            chunkStart - curPos > const Duration(seconds: 45)) {
+          break;
+        }
+
+        // 초기 청크 등 아직 선행 WAV가 없으면 먼저 추출한 뒤, STT와 다음 청크 추출을 중첩 실행
+        if (_supportsPreExtraction(engine)) {
+          final extracted = await _extractChunkToTemp(
+            engine: engine,
+            streamUrl: url,
+            headers: _httpHeaders,
+            start: chunkStart,
+            duration: chunkDuration,
+          );
+          if (!_isEnabled || epoch != _jobEpoch) {
+            if (extracted != null && extracted.existsSync()) {
+              await extracted.delete().catchError((_) => extracted);
+            }
+            break;
+          }
+          if (_isChunkStale(chunkStart, chunkDuration)) {
+            skippedStaleChunkCount++;
+            if (extracted != null && extracted.existsSync()) {
+              await extracted.delete().catchError((_) => extracted);
+            }
+            _adaptiveCursor = _futureLeadStart(_currentPlaybackPosition());
+            _isFirstAdaptiveChunk = false;
+            continue;
+          }
+          if (extracted != null &&
+              extracted.existsSync() &&
+              extracted.lengthSync() > 44) {
+            preWavPath = extracted.path;
+          }
+        }
+      }
+
+      // 다음 30초 청크 백그라운드 선행 추출 시작 (Whisper 연산과 병렬 수행)
+      final nextStart = chunkStart + chunkDuration;
+      const nextDuration = Duration(
+        seconds: AiSubtitleConfig.streamingChunkSeconds,
+      );
+      if (_supportsPreExtraction(engine) &&
+          nextStart - _currentPlaybackPosition() <=
+              const Duration(seconds: 45)) {
+        _startBackgroundPreExtract(
+          engine: engine,
+          streamUrl: url,
+          headers: _httpHeaders,
+          start: nextStart,
+          duration: nextDuration,
+          epoch: epoch,
+        );
+      }
+
+      final outcome = await _processAdaptiveChunk(
+        chunkStart: chunkStart,
+        chunkDuration: chunkDuration,
+        preExtractedWavPath: preWavPath,
+        epoch: epoch,
+      );
+
+      if (!_isEnabled || epoch != _jobEpoch) {
+        _resetAdaptivePipelineState();
+        break;
+      }
+
+      _isFirstAdaptiveChunk = false;
+      if (outcome == _AdaptiveChunkOutcome.skippedStale) {
+        final stalePending = _pendingPreExtracted;
+        if (stalePending != null &&
+            _isChunkStale(stalePending.start, stalePending.duration)) {
+          _pendingPreExtracted = null;
+          stalePending.cancelled = true;
+          unawaited(stalePending.disposeTempFile());
+        }
+        _adaptiveCursor = _futureLeadStart(_currentPlaybackPosition());
+      } else if (outcome == _AdaptiveChunkOutcome.completed) {
+        _adaptiveCursor = nextStart;
+      } else {
+        _adaptiveCursor = nextStart;
+      }
+    }
+  }
+
+  bool _supportsPreExtraction(SubtitleGeneratorEngine engine) {
+    return engine is FreeHybridSubtitleEngine ||
+        engine is OnDeviceSubtitleEngine;
+  }
+
+  Future<File?> _extractChunkToTemp({
+    required SubtitleGeneratorEngine engine,
+    required String streamUrl,
+    required Map<String, String> headers,
+    required Duration start,
+    required Duration duration,
+  }) async {
+    try {
+      final dir = Directory('${Directory.systemTemp.path}/ai_sub_pre_chunks');
+      if (!dir.existsSync()) {
+        dir.createSync(recursive: true);
+      }
+      final outPath =
+          '${dir.path}/chunk_${start.inMilliseconds}_${++_preExtractSeq}.wav';
+      if (engine is FreeHybridSubtitleEngine) {
+        return await engine.preExtractAudioChunk(
+          streamUrl: streamUrl,
+          httpHeaders: headers,
+          start: start,
+          duration: duration,
+          outputWavPath: outPath,
+        );
+      }
+      if (engine is OnDeviceSubtitleEngine) {
+        return await engine.preExtractAudioChunk(
+          streamUrl: streamUrl,
+          httpHeaders: headers,
+          start: start,
+          duration: duration,
+          outputWavPath: outPath,
+        );
+      }
+    } catch (e) {
+      debugPrint('[AiSubtitleService] 오디오 청크 추출 실패(폴백 진행): $e');
+    }
+    return null;
+  }
+
+  void _startBackgroundPreExtract({
+    required SubtitleGeneratorEngine engine,
+    required String streamUrl,
+    required Map<String, String> headers,
+    required Duration start,
+    required Duration duration,
+    required int epoch,
+  }) {
+    if (_pendingPreExtracted != null) return;
+    final dir = Directory('${Directory.systemTemp.path}/ai_sub_pre_chunks');
+    if (!dir.existsSync()) {
+      dir.createSync(recursive: true);
+    }
+    final outPath =
+        '${dir.path}/pre_${start.inMilliseconds}_${++_preExtractSeq}.wav';
+    final holder = _PreExtractedChunk(
+      start: start,
+      duration: duration,
+      wavPath: outPath,
+    );
+    _pendingPreExtracted = holder;
+
+    holder.future = (() async {
+      try {
+        if (!_isEnabled || epoch != _jobEpoch || holder.cancelled) return null;
+        File file;
+        if (engine is FreeHybridSubtitleEngine) {
+          file = await engine.preExtractAudioChunk(
+            streamUrl: streamUrl,
+            httpHeaders: headers,
+            start: start,
+            duration: duration,
+            outputWavPath: outPath,
+          );
+        } else if (engine is OnDeviceSubtitleEngine) {
+          file = await engine.preExtractAudioChunk(
+            streamUrl: streamUrl,
+            httpHeaders: headers,
+            start: start,
+            duration: duration,
+            outputWavPath: outPath,
+          );
+        } else {
+          return null;
+        }
+        if (!_isEnabled || epoch != _jobEpoch || holder.cancelled) {
+          if (file.existsSync()) {
+            await file.delete().catchError((_) => file);
+          }
+          return null;
+        }
+        return file;
+      } catch (e) {
+        debugPrint('[AiSubtitleService] 백그라운드 선행 오디오 추출 무시: $e');
+        await holder.disposeTempFile();
+        return null;
+      }
+    })();
   }
 
   SubtitleGeneratorEngine _buildEngineForConfig(AiSubtitleConfig cfg) {
@@ -620,14 +995,25 @@ class AiSubtitleService extends ChangeNotifier {
     }
 
     if (!await _engine!.isSupported()) {
-      final msg = switch (_config.engineType) {
-        AiSubtitleEngineType.cloudApi =>
-          '현재 환경에서 클라우드 AI 오디오 추출 모듈을 사용할 수 없습니다.',
-        AiSubtitleEngineType.freeHybrid =>
-          '현재 기기에서 온라인 무료 Whisper 자막 엔진을 지원하지 않습니다.',
-        AiSubtitleEngineType.onDevice =>
-          '현재 기기에서 로컬 오프라인 AI 엔진을 지원하지 않습니다.',
-      };
+      final eng = _engine!;
+      String? detailedReason;
+      if (eng is FreeHybridSubtitleEngine) {
+        detailedReason = await eng.getUnsupportedReason();
+      } else if (eng is OnDeviceSubtitleEngine) {
+        detailedReason = await eng.getUnsupportedReason();
+      } else if (eng is CloudAiSubtitleEngine) {
+        detailedReason = await eng.getUnsupportedReason();
+      }
+      final msg = detailedReason ??
+          switch (_config.engineType) {
+            AiSubtitleEngineType.cloudApi =>
+              '현재 환경에서 클라우드 AI 오디오 추출 모듈을 사용할 수 없습니다.',
+            AiSubtitleEngineType.freeHybrid =>
+              '현재 기기에서 온라인 무료 Whisper 자막 엔진을 지원하지 않습니다.',
+            AiSubtitleEngineType.onDevice =>
+              '현재 기기에서 로컬 오프라인 AI 엔진을 지원하지 않습니다.',
+          };
+      _lastErrorMessage = msg;
       _statusMessage = msg;
       onNotification?.call('$msg 동영상 재생은 정상 유지됩니다.', isWarning: true);
       await setEnabled(false);
@@ -669,6 +1055,7 @@ class AiSubtitleService extends ChangeNotifier {
       _isInitializing = false;
       _initProgress = null;
       _statusMessage = null;
+      _lastErrorMessage = null;
       notifyListeners();
       return true;
     } on CloudAiException catch (e) {
@@ -684,8 +1071,9 @@ class AiSubtitleService extends ChangeNotifier {
       _isInitializing = false;
       _initProgress = null;
       _statusMessage = null;
+      _lastErrorMessage = 'AI 모델 준비에 실패했습니다. 동영상 재생은 정상 유지됩니다.';
       onNotification?.call(
-        'AI 모델 준비에 실패했습니다. 동영상 재생은 정상 유지됩니다.',
+        _lastErrorMessage!,
         isWarning: true,
       );
       await setEnabled(false);
@@ -702,6 +1090,34 @@ class AiSubtitleService extends ChangeNotifier {
 
     _cache.markProcessing(bucketIndex);
     _isProcessingChunk = true;
+    _activeChunkWorkers++;
+    if (_activeChunkWorkers > maxConcurrentChunkWorkersObserved) {
+      maxConcurrentChunkWorkersObserved = _activeChunkWorkers;
+    }
+    final usesLocalWhisper = _config.engineType != AiSubtitleEngineType.cloudApi;
+    final modelLabel = usesLocalWhisper
+        ? _config.modelTier.shortName
+        : _config.cloudModelName;
+    final chunkSw = Stopwatch()..start();
+    _statusMessage = 'AI 자막 분석 중 ($modelLabel)...';
+    _chunkProgressTimer?.cancel();
+    _chunkProgressTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!_isEnabled || !_isProcessingChunk) return;
+      final elapsedSec = chunkSw.elapsed.inSeconds;
+      if (epoch != _jobEpoch) {
+        _statusMessage = '이전 분석 마무리 후 새 구간 적용 중 ($elapsedSec초)...';
+      } else if (_isWindowsCpuHeavyWhisper() && elapsedSec >= 25) {
+        _statusMessage =
+            '$modelLabel 분석 중 ($elapsedSec초)... (실시간은 Small/Small Q5_1/Tiny 권장)';
+        _notifySlowCpuModelOnce(
+          elapsedSec: elapsedSec,
+          chunkSec: _config.effectiveChunkSeconds,
+        );
+      } else {
+        _statusMessage = 'AI 자막 분석 중 ($modelLabel · $elapsedSec초)...';
+      }
+      notifyListeners();
+    });
     notifyListeners();
 
     final req = AudioChunkRequest(
@@ -728,7 +1144,7 @@ class AiSubtitleService extends ChangeNotifier {
           translatedCount++;
         }
         _cache.insertSegment(bucketIndex, segment);
-        _updateCurrentSegment(_boundPlayer?.state.position ?? _lastPosition);
+        _updateCurrentSegment(_currentPlaybackPosition());
       }
       if (!_isEnabled || epoch != _jobEpoch) {
         _cache.resetProcessingToUnprocessed(bucketIndex);
@@ -736,6 +1152,13 @@ class AiSubtitleService extends ChangeNotifier {
       }
       _cache.markCompleted(bucketIndex);
       _consecutiveErrors = 0;
+      if (_isWindowsCpuHeavyWhisper() &&
+          chunkSw.elapsed.inSeconds > _config.effectiveChunkSeconds) {
+        _notifySlowCpuModelOnce(
+          elapsedSec: chunkSw.elapsed.inSeconds,
+          chunkSec: _config.effectiveChunkSeconds,
+        );
+      }
       if (engine is FreeHybridSubtitleEngine) {
         await _handleFreeHybridTranslationOutcome(
           engine: engine,
@@ -794,9 +1217,182 @@ class AiSubtitleService extends ChangeNotifier {
         await setEnabled(false);
       }
     } finally {
+      _activeChunkWorkers--;
+      _chunkProgressTimer?.cancel();
+      _chunkProgressTimer = null;
       _isProcessingChunk = false;
+      if (!_isInitializing) {
+        _statusMessage = null;
+      }
       notifyListeners();
     }
+  }
+
+  Future<_AdaptiveChunkOutcome> _processAdaptiveChunk({
+    required Duration chunkStart,
+    required Duration chunkDuration,
+    required String? preExtractedWavPath,
+    required int epoch,
+  }) async {
+    final engine = _engine;
+    final url = _streamUrl;
+    final itemId = _mediaItemId;
+    if (engine == null || url == null || itemId == null) {
+      return _AdaptiveChunkOutcome.cancelled;
+    }
+
+    _isProcessingChunk = true;
+    _activeChunkWorkers++;
+    if (_activeChunkWorkers > maxConcurrentChunkWorkersObserved) {
+      maxConcurrentChunkWorkersObserved = _activeChunkWorkers;
+    }
+
+    final modelLabel = _config.modelTier.shortName;
+    final chunkSw = Stopwatch()..start();
+    _statusMessage = 'AI 자막 분석 중 ($modelLabel)...';
+    _chunkProgressTimer?.cancel();
+    _chunkProgressTimer = Timer.periodic(const Duration(seconds: 5), (_) {
+      if (!_isEnabled || !_isProcessingChunk) return;
+      final elapsedSec = chunkSw.elapsed.inSeconds;
+      if (epoch != _jobEpoch) {
+        _statusMessage = '이전 분석 마무리 후 새 구간 적용 중 ($elapsedSec초)...';
+      } else if (_isWindowsCpuHeavyWhisper() && elapsedSec >= 25) {
+        _statusMessage =
+            '$modelLabel 분석 중 ($elapsedSec초)... (실시간은 Small/Small Q5_1/Tiny 권장)';
+        _notifySlowCpuModelOnce(
+          elapsedSec: elapsedSec,
+          chunkSec: chunkDuration.inSeconds,
+        );
+      } else {
+        _statusMessage = 'AI 자막 분석 중 ($modelLabel · $elapsedSec초)...';
+      }
+      notifyListeners();
+    });
+    notifyListeners();
+
+    var skippedBeforeWhisper = false;
+    final req = AudioChunkRequest(
+      mediaItemId: itemId,
+      streamUrl: url,
+      httpHeaders: _httpHeaders,
+      chunkStart: chunkStart,
+      chunkDuration: chunkDuration,
+      sourceLanguage: _config.sourceLanguage,
+      targetLanguage: _config.targetLanguage,
+      preExtractedWavPath: preExtractedWavPath,
+      shouldSkipBeforeTranscribe: () {
+        final stale = _isChunkStale(chunkStart, chunkDuration);
+        if (stale) {
+          skippedBeforeWhisper = true;
+        }
+        return stale;
+      },
+    );
+
+    var yieldedCount = 0;
+    var translatedCount = 0;
+
+    try {
+      await for (final segment in engine.generateSubtitlesForChunk(req)) {
+        if (!_isEnabled || epoch != _jobEpoch) {
+          return _AdaptiveChunkOutcome.cancelled;
+        }
+        yieldedCount++;
+        if ((segment.translatedText ?? '').trim().isNotEmpty) {
+          translatedCount++;
+        }
+        final segBucket = _cache.bucketIndexFor(segment.startTime);
+        _cache.insertSegment(segBucket, segment);
+        _cache.markCompleted(segBucket);
+        _updateCurrentSegment(_currentPlaybackPosition());
+      }
+
+      if (!_isEnabled || epoch != _jobEpoch) {
+        return _AdaptiveChunkOutcome.cancelled;
+      }
+
+      if (skippedBeforeWhisper ||
+          (yieldedCount == 0 && _isChunkStale(chunkStart, chunkDuration))) {
+        skippedStaleChunkCount++;
+        return _AdaptiveChunkOutcome.skippedStale;
+      }
+
+      _consecutiveErrors = 0;
+      if (_isWindowsCpuHeavyWhisper() &&
+          chunkSw.elapsed.inSeconds > chunkDuration.inSeconds) {
+        _notifySlowCpuModelOnce(
+          elapsedSec: chunkSw.elapsed.inSeconds,
+          chunkSec: chunkDuration.inSeconds,
+        );
+      }
+
+      if (engine is FreeHybridSubtitleEngine) {
+        await _handleFreeHybridTranslationOutcome(
+          engine: engine,
+          yieldedCount: yieldedCount,
+          translatedCount: translatedCount,
+        );
+      } else if (!_hasNotifiedTranslationError &&
+          engine is OnDeviceSubtitleEngine &&
+          engine.isTranslationSupported &&
+          engine.lastTranslationError != null) {
+        _hasNotifiedTranslationError = true;
+        final rawErr = engine.lastTranslationError!;
+        final shortErr =
+            rawErr.length > 120 ? '${rawErr.substring(0, 120)}...' : rawErr;
+        onNotification?.call(
+          '온디바이스 한국어 번역 모델 준비에 실패해 원어 자막으로 표시됩니다. ($shortErr)',
+          isWarning: true,
+        );
+      }
+      unawaited(_cache.persistToDisk());
+      return _AdaptiveChunkOutcome.completed;
+    } catch (e) {
+      if (!_isEnabled || epoch != _jobEpoch) {
+        return _AdaptiveChunkOutcome.cancelled;
+      }
+      debugPrint(
+        '[AiSubtitleService] 적응형 청크(${chunkStart.inSeconds}s) 처리 실패(스킵): $e',
+      );
+      _consecutiveErrors++;
+      if (_consecutiveErrors >= _maxConsecutiveErrors) {
+        onNotification?.call(
+          '현재 스트림에서 AI 오디오 분석이 연속 제한되어 실험 기능을 일시 중지했습니다.',
+          isWarning: true,
+        );
+        await setEnabled(false);
+      }
+      return _AdaptiveChunkOutcome.failed;
+    } finally {
+      _activeChunkWorkers--;
+      _chunkProgressTimer?.cancel();
+      _chunkProgressTimer = null;
+      _isProcessingChunk = false;
+      if (!_isInitializing) {
+        _statusMessage = null;
+      }
+      notifyListeners();
+    }
+  }
+
+  bool _isWindowsCpuHeavyWhisper() {
+    if (_config.engineType == AiSubtitleEngineType.cloudApi) return false;
+    final isWin = isWindowsPlatformOverride ??
+        defaultTargetPlatform == TargetPlatform.windows;
+    if (!isWin) return false;
+    return _config.modelTier == AiWhisperModelTier.largeV3TurboQ5;
+  }
+
+  void _notifySlowCpuModelOnce({
+    required int elapsedSec,
+    required int chunkSec,
+  }) {
+    if (_hasNotifiedSlowCpuModel) return;
+    _hasNotifiedSlowCpuModel = true;
+    onNotification?.call(
+      '${_config.modelTier.shortName} 모델 처리 시간($elapsedSec초+)이 재생 구간($chunkSec초)보다 길어 실시간 번역이 지연됩니다. 기본 추천 모델(Small / Small Q5_1) 또는 Tiny 사용을 권장합니다.',
+      isWarning: true,
+    );
   }
 
   /// 클라우드 AI 실패 시 재생을 절대 멈추지 않고 안전 중단 또는 온디바이스 폴백 수행.
@@ -933,5 +1529,35 @@ class AiSubtitleService extends ChangeNotifier {
         debugPrint('[AiSubtitleService] 엔진 해제 경고(무시): $e');
       }
     }
+  }
+}
+
+enum _AdaptiveChunkOutcome {
+  completed,
+  skippedStale,
+  cancelled,
+  failed,
+}
+
+class _PreExtractedChunk {
+  final Duration start;
+  final Duration duration;
+  final String wavPath;
+  bool cancelled = false;
+  Future<File?> future = Future<File?>.value(null);
+
+  _PreExtractedChunk({
+    required this.start,
+    required this.duration,
+    required this.wavPath,
+  });
+
+  Future<void> disposeTempFile() async {
+    try {
+      final f = File(wavPath);
+      if (f.existsSync()) {
+        await f.delete();
+      }
+    } catch (_) {}
   }
 }

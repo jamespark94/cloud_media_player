@@ -7,6 +7,7 @@ import '../../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../../models/ai_subtitle/subtitle_segment.dart';
 import '../ai_subtitle_key_storage.dart';
 import '../extractors/audio_chunk_extractor.dart';
+import '../extractors/desktop_ffmpeg_extractor.dart';
 import '../subtitle_generator_engine.dart';
 
 /// 클라우드 AI 자막 엔진 오류 분류.
@@ -117,6 +118,22 @@ class CloudAiSubtitleEngine implements SubtitleGeneratorEngine {
     if (!extractorOk) return false;
     final key = await _getApiKey();
     return key != null && key.isNotEmpty;
+  }
+
+  /// 현재 환경에서 클라우드 AI 엔진을 사용할 수 없는 사유를 반환합니다.
+  Future<String?> getUnsupportedReason() async {
+    final extractor = _extractor;
+    if (!await extractor.isAvailable()) {
+      if (extractor is DesktopFfmpegExtractor) {
+        return await extractor.getUnavailableReason();
+      }
+      return '오디오 청크 추출 모듈을 사용할 수 없습니다.';
+    }
+    final key = await _getApiKey();
+    if (key == null || key.isEmpty) {
+      return 'Gemini API 키가 입력되지 않았습니다.';
+    }
+    return null;
   }
 
   @override
