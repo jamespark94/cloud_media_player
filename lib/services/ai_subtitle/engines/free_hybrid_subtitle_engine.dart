@@ -4,11 +4,13 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import '../../../models/ai_subtitle/ai_subtitle_config.dart';
 import '../../../models/ai_subtitle/subtitle_segment.dart';
+import '../ai_subtitle_key_storage.dart';
 import '../extractors/audio_chunk_extractor.dart';
 import '../extractors/desktop_ffmpeg_extractor.dart';
 import '../stt/whisper_chunk_runner.dart';
 import '../stt/whisper_isolate_worker.dart';
 import '../subtitle_generator_engine.dart';
+import '../translators/gcp_cloud_subtitle_translator.dart';
 import '../translators/google_web_batch_translator.dart';
 
 /// 번역 전 문장 병합(Pre-processing) 결과 단위.
@@ -51,9 +53,12 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
   final AudioChunkExtractor _preExtractor;
   final WhisperIsolateWorker _whisperWorker;
   final GoogleWebBatchTranslator _batchTranslator;
+  final GcpCloudSubtitleTranslator _gcpTranslator;
+  final Future<String?> Function() _gcpApiKeyProvider;
 
   int _chunkSeq = 0;
   bool _isCancelled = false;
+  bool _isGcpTranslatorInitialized = false;
   CancelToken? _activeCancelToken;
   String? _lastTranslationError;
 
@@ -63,10 +68,20 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
     AudioChunkExtractor? preExtractor,
     WhisperIsolateWorker? whisperWorker,
     GoogleWebBatchTranslator? batchTranslator,
+    GcpCloudSubtitleTranslator? gcpTranslator,
+    Future<String?> Function()? gcpApiKeyProvider,
   })  : _extractor = extractor ?? AudioChunkExtractor.create(),
         _preExtractor = preExtractor ?? extractor ?? AudioChunkExtractor.create(),
         _whisperWorker = whisperWorker ?? WhisperIsolateWorker(),
-        _batchTranslator = batchTranslator ?? GoogleWebBatchTranslator();
+        _batchTranslator = batchTranslator ?? GoogleWebBatchTranslator(),
+        _gcpApiKeyProvider = gcpApiKeyProvider ??
+            (() => AiSubtitleKeyStorage.instance.loadGcpTranslationApiKey()),
+        _gcpTranslator = gcpTranslator ??
+            GcpCloudSubtitleTranslator(
+              apiKeyProvider: gcpApiKeyProvider ??
+                  (() => AiSubtitleKeyStorage.instance
+                      .loadGcpTranslationApiKey()),
+            );
 
   @override
   String get engineId => 'free_hybrid_whisper_${modelTier.code}';
@@ -111,6 +126,7 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
     void Function(double progress, String status)? onProgress,
   }) async {
     _lastTranslationError = null;
+    _isGcpTranslatorInitialized = false;
     await _whisperWorker.initialize(
       tier: modelTier,
       onProgress: onProgress,
@@ -178,23 +194,53 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
       return;
     }
 
-    // 3. 병합된 완결 문장들을 `\n|||\n`로 묶어 청크당 1회 무료 배치 번역
-    final cancelToken = CancelToken();
-    _activeCancelToken = cancelToken;
+    // 3. GCP Cloud Translation API 키가 있으면 GCP v2 배치 번역(실패 시 ML Kit/기본 폴백),
+    //    미입력 시 기존 무료 Google Web Translate 배치 번역 수행
+    final gcpApiKey = (await _gcpApiKeyProvider())?.trim();
+    final sentenceTexts =
+        mergedSentences.map((m) => m.mergedText).toList(growable: false);
+
     BatchTranslationResult? batchResult;
-    try {
-      batchResult = await _batchTranslator.translateBatch(
-        mergedSentences.map((m) => m.mergedText).toList(growable: false),
-        sourceLang: request.sourceLanguage,
-        targetLang: request.targetLanguage,
-        cancelToken: cancelToken,
-      );
-    } catch (e) {
-      debugPrint('[FreeHybridSubtitleEngine] 배치 번역 예외(원어 폴백): $e');
-      batchResult = null;
-    } finally {
-      if (identical(_activeCancelToken, cancelToken)) {
-        _activeCancelToken = null;
+    if (gcpApiKey != null && gcpApiKey.isNotEmpty) {
+      try {
+        if (!_isGcpTranslatorInitialized) {
+          await _gcpTranslator.initialize(
+            sourceLang: request.sourceLanguage,
+            targetLang: request.targetLanguage,
+          );
+          _isGcpTranslatorInitialized = true;
+        }
+        batchResult = await _gcpTranslator.translateBatchDetailed(
+          sentenceTexts,
+          detectedSourceLang: request.sourceLanguage,
+        );
+        if (batchResult.translations.every((t) => t == null)) {
+          _lastTranslationError = _gcpTranslator.lastErrorMessage;
+        } else {
+          _lastTranslationError = null;
+        }
+      } catch (e) {
+        debugPrint('[FreeHybridSubtitleEngine] GCP 번역 예외(원어 폴백): $e');
+        _lastTranslationError = _gcpTranslator.lastErrorMessage ?? '$e';
+        batchResult = null;
+      }
+    } else {
+      final cancelToken = CancelToken();
+      _activeCancelToken = cancelToken;
+      try {
+        batchResult = await _batchTranslator.translateBatch(
+          sentenceTexts,
+          sourceLang: request.sourceLanguage,
+          targetLang: request.targetLanguage,
+          cancelToken: cancelToken,
+        );
+      } catch (e) {
+        debugPrint('[FreeHybridSubtitleEngine] 배치 번역 예외(원어 폴백): $e');
+        batchResult = null;
+      } finally {
+        if (identical(_activeCancelToken, cancelToken)) {
+          _activeCancelToken = null;
+        }
       }
     }
 
@@ -202,8 +248,8 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
 
     if (batchResult == null) {
       // 오프라인/번역 실패 시 재생 중단 없이 원어 자막만 안전 출력
-      _lastTranslationError =
-          _batchTranslator.lastErrorMessage ?? '무료 번역 요청에 실패했습니다.';
+      _lastTranslationError ??=
+          _batchTranslator.lastErrorMessage ?? '번역 요청에 실패했습니다.';
       for (final seg in rawSegments) {
         if (_isCancelled) return;
         yield seg;
@@ -212,7 +258,10 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
     }
 
     // 4. 번역 결과 후처리 (Post-processing): 글자 수(또는 재생 시간) 비율에 맞춰 타임스탬프 재분배
-    _lastTranslationError = null;
+    if (_lastTranslationError == null ||
+        batchResult.translations.any((t) => t != null && t.isNotEmpty)) {
+      _lastTranslationError = null;
+    }
     final translatedSegments = applyMergedTranslations(
       rawSegments: rawSegments,
       mergedSentences: mergedSentences,
@@ -574,6 +623,7 @@ class FreeHybridSubtitleEngine implements SubtitleGeneratorEngine {
     await _extractor.dispose();
     await _preExtractor.dispose();
     _batchTranslator.dispose();
+    await _gcpTranslator.dispose();
     await _whisperWorker.release();
   }
 }

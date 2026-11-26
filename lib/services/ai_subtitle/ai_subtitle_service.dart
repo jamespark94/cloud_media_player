@@ -11,6 +11,7 @@ import 'engines/on_device_subtitle_engine.dart';
 import 'extractors/local_http_audio_relay.dart';
 import 'subtitle_generator_engine.dart';
 import 'subtitle_segment_cache.dart';
+import 'translators/gcp_cloud_subtitle_translator.dart';
 import 'translators/subtitle_translator.dart';
 
 /// AI 실시간 자막 생성·번역 계층의 최상위 Facade & ChangeNotifier.
@@ -168,9 +169,14 @@ class AiSubtitleService extends ChangeNotifier {
   String? get maskedGeminiApiKey =>
       AiSubtitleKeyStorage.maskApiKey(_keyStorage.cachedApiKey);
 
+  bool get hasGcpTranslationApiKey => _keyStorage.hasCachedGcpTranslationApiKey;
+  String? get maskedGcpTranslationApiKey =>
+      AiSubtitleKeyStorage.maskApiKey(_keyStorage.cachedGcpTranslationApiKey);
+
   bool get isTranslationSupported {
     if (_config.engineType == AiSubtitleEngineType.cloudApi ||
-        _config.engineType == AiSubtitleEngineType.freeHybrid) {
+        _config.engineType == AiSubtitleEngineType.freeHybrid ||
+        hasGcpTranslationApiKey) {
       return true;
     }
     return translationSupportedOverride ??
@@ -213,6 +219,24 @@ class AiSubtitleService extends ChangeNotifier {
     notifyListeners();
   }
 
+  Future<String?> loadGcpTranslationApiKey({bool forceRefresh = false}) async {
+    final key = await _keyStorage.loadGcpTranslationApiKey(
+      forceRefresh: forceRefresh,
+    );
+    notifyListeners();
+    return key;
+  }
+
+  Future<void> saveGcpTranslationApiKey(String apiKey) async {
+    await _keyStorage.saveGcpTranslationApiKey(apiKey);
+    notifyListeners();
+  }
+
+  Future<void> deleteGcpTranslationApiKey() async {
+    await _keyStorage.deleteGcpTranslationApiKey();
+    notifyListeners();
+  }
+
   /// 기존 플레이어가 스트림을 오픈한 직후 Read-Only 컨텍스트만 등록합니다.
   /// `isEnabled == false`인 동안에는 어떠한 리소스도 초기화하지 않습니다.
   Future<void> bindStreamContext({
@@ -242,6 +266,7 @@ class AiSubtitleService extends ChangeNotifier {
     }
 
     await _keyStorage.loadApiKey();
+    await _keyStorage.loadGcpTranslationApiKey();
     await _cache.switchContext(
       mediaItemId: mediaItemId,
       sourceLanguage: _config.sourceLanguage,
@@ -331,6 +356,7 @@ class AiSubtitleService extends ChangeNotifier {
     _resetAdaptivePipelineState();
     _lastErrorMessage = null;
     await _keyStorage.loadApiKey();
+    await _keyStorage.loadGcpTranslationApiKey();
     notifyListeners();
 
     final player = _boundPlayer;
@@ -963,12 +989,27 @@ class AiSubtitleService extends ChangeNotifier {
         if (_freeHybridEngineFactory != null) {
           return _freeHybridEngineFactory(cfg.modelTier);
         }
-        return FreeHybridSubtitleEngine(modelTier: cfg.modelTier);
+        return FreeHybridSubtitleEngine(
+          modelTier: cfg.modelTier,
+          gcpApiKeyProvider: () => _keyStorage.loadGcpTranslationApiKey(),
+          gcpTranslator: GcpCloudSubtitleTranslator(
+            apiKeyProvider: () => _keyStorage.loadGcpTranslationApiKey(),
+            hasApiKeySync: () => _keyStorage.hasCachedGcpTranslationApiKey,
+            onFallback: (reason) => onNotification?.call(reason, isWarning: true),
+          ),
+        );
       case AiSubtitleEngineType.onDevice:
         if (_onDeviceEngineFactory != null) {
           return _onDeviceEngineFactory(cfg.modelTier);
         }
-        return OnDeviceSubtitleEngine(modelTier: cfg.modelTier);
+        return OnDeviceSubtitleEngine(
+          modelTier: cfg.modelTier,
+          translator: GcpCloudSubtitleTranslator(
+            apiKeyProvider: () => _keyStorage.loadGcpTranslationApiKey(),
+            hasApiKeySync: () => _keyStorage.hasCachedGcpTranslationApiKey,
+            onFallback: (reason) => onNotification?.call(reason, isWarning: true),
+          ),
+        );
     }
   }
 
@@ -1469,8 +1510,11 @@ class AiSubtitleService extends ChangeNotifier {
       _consecutiveTranslationErrors++;
       if (!_hasNotifiedTranslationError) {
         _hasNotifiedTranslationError = true;
+        final isGcpErr = err.contains('GCP');
         onNotification?.call(
-          '오프라인 상태이거나 무료 번역 요청에 실패해 원어 자막만 표시합니다. (재생은 정상 유지)',
+          isGcpErr
+              ? '$err 원어 자막으로 표시합니다. (재생은 정상 유지)'
+              : '오프라인 상태이거나 무료 번역 요청에 실패해 원어 자막만 표시합니다. (재생은 정상 유지)',
           isWarning: true,
         );
       }

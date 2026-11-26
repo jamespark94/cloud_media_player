@@ -7,14 +7,16 @@ import '../extractors/desktop_ffmpeg_extractor.dart';
 import '../stt/whisper_chunk_runner.dart';
 import '../stt/whisper_isolate_worker.dart';
 import '../subtitle_generator_engine.dart';
+import '../translators/gcp_cloud_subtitle_translator.dart';
 import '../translators/mlkit_subtitle_translator.dart';
 import '../translators/subtitle_translator.dart';
 
-/// Phase 1 온디바이스 경량 MVP 자막 생성 엔진.
+/// 온디바이스 경량 + 선택적 GCP Cloud Translation 자막 생성 엔진.
 ///
 /// 1. FFmpeg(Input Seeking)로 16kHz Mono PCM WAV 청크 추출
 /// 2. Whisper.cpp FFI (백그라운드 Isolate)로 원어 STT + 타임스탬프 추출
-/// 3. 플랫폼 분기 번역기 (Android/iPadOS: ML Kit 한국어 번역, Windows: 원어 단독 출력)
+/// 3. GCP Cloud Translation API 키가 설정된 경우 배치 POST 번역 우선 수행,
+///    미입력 또는 403/429 오류 시 플랫폼별 로컬 번역기(Android/iPadOS: ML Kit, Windows: 원어 단독)로 자동 전환
 class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
   final AudioChunkExtractor _extractor;
   final AudioChunkExtractor _preExtractor;
@@ -35,7 +37,7 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
   })  : _extractor = extractor ?? AudioChunkExtractor.create(),
         _preExtractor = preExtractor ?? extractor ?? AudioChunkExtractor.create(),
         _whisperWorker = whisperWorker ?? WhisperIsolateWorker(),
-        _translator = translator ?? SubtitleTranslator.create();
+        _translator = translator ?? GcpCloudSubtitleTranslator();
 
   @override
   String get engineId => 'on_device_whisper_${modelTier.code}';
@@ -134,21 +136,34 @@ class OnDeviceSubtitleEngine implements SubtitleGeneratorEngine {
       }
     }
 
-    // 2. 플랫폼별 로컬 번역 (Windows는 null 반환 -> 원어 자막 단독 유지)
-    for (final seg in rawSegments) {
+    // 2. 일괄 번역 (GCP Cloud Translation 우선, 미입력/403/429 시 ML Kit 또는 기본 폴백 자동 전환)
+    List<String?> translations = List<String?>.filled(rawSegments.length, null);
+    if (_translator.isTranslationSupported) {
+      final hints = rawSegments
+          .map(
+            (seg) => _resolveTranslationHint(
+              requestSourceLanguage: request.sourceLanguage,
+              segment: seg,
+            ),
+          )
+          .toList(growable: false);
+      translations = await _translator.translateBatch(
+        rawSegments.map((s) => s.originalText).toList(growable: false),
+        detectedSourceLangs: hints,
+      );
+    }
+
+    final detectedGcpLang = _translator is GcpCloudSubtitleTranslator
+        ? _translator.lastDetectedSourceLanguage
+        : null;
+
+    for (var i = 0; i < rawSegments.length; i++) {
       if (_isCancelled) return;
-      String? translated;
-      if (_translator.isTranslationSupported) {
-        final hint = _resolveTranslationHint(
-          requestSourceLanguage: request.sourceLanguage,
-          segment: seg,
-        );
-        translated = await _translator.translate(
-          seg.originalText,
-          detectedSourceLang: hint,
-        );
-      }
-      yield seg.copyWith(translatedText: translated);
+      final seg = rawSegments[i];
+      yield seg.copyWith(
+        translatedText: i < translations.length ? translations[i] : null,
+        languageCode: seg.languageCode ?? detectedGcpLang,
+      );
     }
   }
 

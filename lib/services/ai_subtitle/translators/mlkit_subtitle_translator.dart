@@ -119,6 +119,24 @@ class MlKitSubtitleTranslator implements SubtitleTranslator {
     }
   }
 
+  @override
+  Future<List<String?>> translateBatch(
+    List<String> texts, {
+    String? detectedSourceLang,
+    List<String?>? detectedSourceLangs,
+  }) async {
+    if (texts.isEmpty) return const [];
+    final results = <String?>[];
+    for (var i = 0; i < texts.length; i++) {
+      final hint =
+          (detectedSourceLangs != null && i < detectedSourceLangs.length)
+              ? (detectedSourceLangs[i] ?? detectedSourceLang)
+              : detectedSourceLang;
+      results.add(await translate(texts[i], detectedSourceLang: hint));
+    }
+    return results;
+  }
+
   String _resolveSourceLangCode(String text, String? hint) {
     final normalizedHint = hint == null ? '' : _normalizeLangCode(hint);
     if (normalizedHint.isNotEmpty &&

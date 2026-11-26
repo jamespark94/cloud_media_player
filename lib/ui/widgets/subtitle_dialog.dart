@@ -12,6 +12,7 @@ import '../../services/ai_subtitle/translators/subtitle_translator.dart';
 import '../../services/cloud_service_interface.dart';
 import '../../services/subtitle_settings_service.dart';
 import '../../utils/subtitle_utils.dart';
+import 'api_key_settings_card.dart';
 
 class SubtitleDialog extends StatefulWidget {
   final Player player;
@@ -76,6 +77,7 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
     );
     SubtitleSettingsService.instance.init();
     AiSubtitleService.instance.loadGeminiApiKey();
+    AiSubtitleService.instance.loadGcpTranslationApiKey();
     _refreshWhisperModelStates();
     _findCloudSubtitles();
   }
@@ -496,16 +498,20 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
         final usesLocalWhisper = !isCloud;
         final isLocalTranslatorSupported =
             SubtitleTranslator.create().isTranslationSupported;
+        final hasGcpTranslationKey = ai.hasGcpTranslationApiKey;
         final cachedCount = ai.cache.totalSegmentCount;
 
         final engineSubtitle = switch (selectedEngine) {
           AiSubtitleEngineType.cloudApi =>
             'Gemini 멀티모달 고품질 전사 + 한국어 의역 (${ai.config.cloudModelName})',
-          AiSubtitleEngineType.freeHybrid =>
-            '로컬 Whisper(${selectedTier.shortName}) + 무료 구글 번역 (무제한)',
-          AiSubtitleEngineType.onDevice => isLocalTranslatorSupported
-              ? '로컬 오프라인 Whisper(${selectedTier.shortName}) + ML Kit 번역'
-              : '로컬 오프라인 원어 자막 STT (${selectedTier.shortName})',
+          AiSubtitleEngineType.freeHybrid => hasGcpTranslationKey
+              ? '로컬 Whisper(${selectedTier.shortName}) + GCP Cloud Translation'
+              : '로컬 Whisper(${selectedTier.shortName}) + 무료 구글 번역 (무제한)',
+          AiSubtitleEngineType.onDevice => hasGcpTranslationKey
+              ? '로컬 Whisper(${selectedTier.shortName}) + GCP Cloud Translation'
+              : (isLocalTranslatorSupported
+                  ? '로컬 오프라인 Whisper(${selectedTier.shortName}) + ML Kit 번역'
+                  : '로컬 오프라인 원어 자막 STT (${selectedTier.shortName})'),
         };
 
         return Container(
@@ -960,8 +966,10 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                 ),
               ],
 
-              // 3. Windows 로컬 오프라인 번역 미지원 안내 또는 클라우드 AI API Key 설정 UI
-              if (isOnDevice && !isLocalTranslatorSupported) ...[
+              // 3. Windows 로컬 오프라인 번역 미지원 안내 또는 GCP/Gemini API Key 설정 UI
+              if (isOnDevice &&
+                  !isLocalTranslatorSupported &&
+                  !hasGcpTranslationKey) ...[
                 const SizedBox(height: 8),
                 Container(
                   width: double.infinity,
@@ -1001,6 +1009,22 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                       ),
                     ],
                   ),
+                ),
+              ],
+              if (usesLocalWhisper) ...[
+                const SizedBox(height: 10),
+                ApiKeySettingsCard(
+                  title: 'GCP Cloud Translation API 키 (선택)',
+                  description:
+                      '입력 시 Google Cloud Translation v2로 일괄 번역하며, 미입력/403/429 시 온디바이스 ML Kit 또는 기본 번역기로 자동 전환됩니다.',
+                  hintExisting: '새 GCP Translation API 키 입력 시 덮어쓰기',
+                  hintEmpty: 'AIza... 형태의 GCP Translation API 키 입력',
+                  icon: Icons.translate,
+                  hasKey: ai.hasGcpTranslationApiKey,
+                  maskedKey: ai.maskedGcpTranslationApiKey,
+                  onSave: ai.saveGcpTranslationApiKey,
+                  onDelete: ai.deleteGcpTranslationApiKey,
+                  onFeedback: _setAiFeedback,
                 ),
               ],
               if (isCloud) ...[
@@ -1173,6 +1197,7 @@ class _SubtitleDialogState extends State<SubtitleDialog> with SingleTickerProvid
                         ai.updateConfig(ai.config.copyWith(displayMode: mode));
                         if (isOnDevice &&
                             !isLocalTranslatorSupported &&
+                            !hasGcpTranslationKey &&
                             mode != AiSubtitleDisplayMode.originalOnly) {
                           _setAiFeedback(
                             'Windows 로컬 오프라인은 원어 자막만 지원합니다. 한국어 번역을 원하시면 [온라인 무료] 또는 [클라우드 AI]를 선택해 주세요.',

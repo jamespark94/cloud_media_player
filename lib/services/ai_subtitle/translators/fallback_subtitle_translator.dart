@@ -2,7 +2,7 @@ import 'subtitle_translator.dart';
 
 /// Windows 데스크톱 및 미지원 플랫폼용 안전 폴백 번역기.
 ///
-/// Phase 1에서는 `google_mlkit_translation` 의존성으로 인한 빌드 깨짐을 원천 차단하고,
+/// `google_mlkit_translation` 의존성으로 인한 빌드 깨짐을 원천 차단하고,
 /// STT가 인식한 원어 자막만 안전하게 출력합니다.
 class FallbackSubtitleTranslator implements SubtitleTranslator {
   @override
@@ -27,6 +27,15 @@ class FallbackSubtitleTranslator implements SubtitleTranslator {
     String? detectedSourceLang,
   }) async {
     return null;
+  }
+
+  @override
+  Future<List<String?>> translateBatch(
+    List<String> texts, {
+    String? detectedSourceLang,
+    List<String?>? detectedSourceLangs,
+  }) async {
+    return List<String?>.filled(texts.length, null);
   }
 
   @override

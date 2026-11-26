@@ -14,6 +14,7 @@ import '../../services/playback_history_service.dart';
 import '../../utils/permission_utils.dart';
 import 'add_account_dialog.dart';
 import 'add_folder_shortcut_dialog.dart';
+import 'app_settings_dialog.dart';
 import 'browser_screen.dart';
 import 'player_screen.dart';
 
@@ -240,6 +241,11 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
             icon: const Icon(Icons.cloud_upload_outlined),
             tooltip: '클라우드 드라이브 연결',
             onPressed: () => _openAddAccountDialog(context),
+          ),
+          IconButton(
+            icon: const Icon(Icons.settings_outlined),
+            tooltip: '앱 설정 (번역 API 키)',
+            onPressed: () => _openAppSettingsDialog(context),
           ),
           const SizedBox(width: 8),
         ],
@@ -2275,6 +2281,13 @@ class _HomeScreenState extends State<HomeScreen> with WidgetsBindingObserver {
     showDialog(
       context: context,
       builder: (_) => const AddAccountDialog(),
+    );
+  }
+
+  void _openAppSettingsDialog(BuildContext context) {
+    showDialog(
+      context: context,
+      builder: (_) => const AppSettingsDialog(),
     );
   }
 
